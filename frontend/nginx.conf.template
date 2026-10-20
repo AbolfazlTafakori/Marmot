@@ -1,0 +1,23 @@
+# Development only: serves the built panel and proxies /api (including the
+# WebSocket) to the node in $MARMOT_API.
+server {
+    listen 8080;
+    root /usr/share/nginx/html;
+
+    location /api/ {
+        proxy_pass ${MARMOT_API};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $http_connection;
+        proxy_set_header Host $host;
+    }
+
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    location / {
+        add_header Cache-Control "no-cache";
+        try_files $uri /index.html;
+    }
+}

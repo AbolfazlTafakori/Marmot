@@ -1,0 +1,63 @@
+// Package transport defines the plug-in contract for inter-node wire
+// protocols and a registry of the transports compiled into this binary.
+// A transport only moves bytes; it knows nothing about sessions or peers.
+package transport
+
+import (
+	"context"
+	"io"
+	"net"
+	"net/netip"
+)
+
+// Kind tells whether a transport yields a byte stream or datagrams.
+type Kind uint8
+
+const (
+	// Stream transports deliver reliable, ordered bytes.
+	Stream Kind = 1
+	// Datagram transports deliver unreliable messages.
+	Datagram Kind = 2
+)
+
+// Endpoint is one dialable address of a peer.
+type Endpoint struct {
+	Addr    netip.AddrPort
+	Options map[string]any
+}
+
+// ListenConfig describes one inter-node listener.
+type ListenConfig struct {
+	Addr    netip.AddrPort
+	Options map[string]any
+}
+
+// Transport is implemented by every wire protocol plug-in.
+type Transport interface {
+	Name() string
+	Kind() Kind
+	// Dial connects to ep. local, when valid, is the source address.
+	Dial(ctx context.Context, ep Endpoint, local netip.Addr) (Conn, error)
+	Listen(ctx context.Context, cfg ListenConfig) (Listener, error)
+}
+
+// Conn is a Stream-kind connection.
+type Conn interface {
+	io.ReadWriteCloser
+	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
+}
+
+// PacketConn is a Datagram-kind connection.
+type PacketConn interface {
+	ReadPacket(b []byte) (int, error)
+	WritePacket(b []byte) error
+	Close() error
+}
+
+// Listener accepts inbound Stream-kind connections.
+type Listener interface {
+	Accept() (Conn, error)
+	Close() error
+	Addr() net.Addr
+}

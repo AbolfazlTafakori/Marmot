@@ -1,0 +1,4 @@
+dist
+node_modules
+src/shared/api/schema.d.ts
+package-lock.json

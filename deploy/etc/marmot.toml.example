@@ -1,0 +1,26 @@
+# Starting configuration for the container. Copy to marmot.toml and edit.
+# Full reference: docs/config.example.toml
+
+[node]
+id = "my-node-01"
+identity_key_file = "/etc/marmot/identity.key"
+
+[steering]
+# User-facing ports Marmot carries; every other port is left alone.
+tunneled_ports = []
+
+[[transport_listen]]
+transport = "tls"
+port = 9443
+
+[api]
+listen = "0.0.0.0:7443"
+data_dir = "/var/lib/marmot"
+web_root = "/usr/share/marmot/web"
+# tls_cert = "/etc/marmot/panel.crt"
+# tls_key = "/etc/marmot/panel.key"
+# allow_ips = ["203.0.113.0/24"]
+
+[telemetry]
+log_level = "info"
+metrics_listen = "127.0.0.1:9100"

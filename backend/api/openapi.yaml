@@ -1,0 +1,654 @@
+openapi: 3.1.0
+info:
+  title: Marmot Panel API
+  version: 0.1.0
+  description: |
+    Control-plane API for one Marmot node. Panel-agnostic: it manages tunnels,
+    ports and peers only; it knows nothing about proxy users or proxy panels.
+    All endpoints except /auth/login and /healthz require a session cookie.
+    State-changing requests also require the `X-CSRF-Token` header.
+servers:
+  - url: /api/v1
+
+tags:
+  - name: auth
+  - name: node
+  - name: config
+  - name: steering
+  - name: peers
+  - name: stats
+  - name: admins
+  - name: audit
+
+security:
+  - session: []
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      security: []
+      summary: Log in with username, password and (if enabled) TOTP code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Logged in; sets HttpOnly session cookie
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: End the current session
+      responses:
+        '204': { description: Logged out }
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Current admin
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+          description: OK
+  /auth/totp:
+    post:
+      tags: [auth]
+      summary: Start TOTP enrolment; returns a provisioning URI
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [uri]
+                properties: { uri: { type: string } }
+    put:
+      tags: [auth]
+      summary: Confirm TOTP enrolment with a code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties: { code: { type: string, pattern: '^[0-9]{6}$' } }
+      responses:
+        '204': { description: Enabled }
+        '400': { $ref: '#/components/responses/BadRequest' }
+    delete:
+      tags: [auth]
+      summary: Disable TOTP (requires current code)
+      parameters:
+        - { name: code, in: query, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Disabled }
+
+  /node/status:
+    get:
+      tags: [node]
+      summary: Live snapshot of the node
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NodeStatus' }
+  /node/identity:
+    get:
+      tags: [node]
+      summary: Public key and a join token other nodes can import
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Identity' }
+  /node/reload:
+    post:
+      tags: [node]
+      summary: Re-read marmot.toml from disk and apply it
+      responses:
+        '204': { description: Applied }
+        '422': { $ref: '#/components/responses/InvalidConfig' }
+
+  /config:
+    get:
+      tags: [config]
+      summary: Full configuration as TOML text plus a version for optimistic locking
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigDocument' }
+    put:
+      tags: [config]
+      summary: Replace configuration (validate, write atomically, reload)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfigDocument' }
+      responses:
+        '200':
+          description: Applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigDocument' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/InvalidConfig' }
+  /config/validate:
+    post:
+      tags: [config]
+      summary: Validate configuration without applying it
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfigDocument' }
+      responses:
+        '200':
+          description: Result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationResult' }
+
+  /steering:
+    get:
+      tags: [steering]
+      summary: User-facing port rules
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Steering' }
+    put:
+      tags: [steering]
+      summary: Replace user-facing port rules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Steering' }
+      responses:
+        '200':
+          description: Applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Steering' }
+        '422': { $ref: '#/components/responses/InvalidConfig' }
+
+  /peers:
+    get:
+      tags: [peers]
+      summary: List peers with live health
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PeerView' }
+    post:
+      tags: [peers]
+      summary: Add a peer (directly or from a join token)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/Peer'
+                - $ref: '#/components/schemas/JoinRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PeerView' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/InvalidConfig' }
+  /peers/{peerId}:
+    parameters:
+      - $ref: '#/components/parameters/PeerId'
+    get:
+      tags: [peers]
+      summary: One peer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PeerView' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [peers]
+      summary: Update a peer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Peer' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PeerView' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/InvalidConfig' }
+    delete:
+      tags: [peers]
+      summary: Remove a peer and revoke its sessions immediately
+      responses:
+        '204': { description: Removed }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /peers/{peerId}/paths:
+    parameters:
+      - $ref: '#/components/parameters/PeerId'
+    get:
+      tags: [peers]
+      summary: Live paths to a peer with metrics and controller score
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PathView' }
+
+  /stats/traffic:
+    get:
+      tags: [stats]
+      summary: Traffic time series
+      parameters:
+        - { name: range, in: query, schema: { type: string, enum: [1h, 24h, 7d, 30d], default: 24h } }
+        - { name: peer, in: query, schema: { type: string } }
+        - { name: port, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrafficSeries' }
+
+  /admins:
+    get:
+      tags: [admins]
+      summary: List panel administrators
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Admin' }
+    post:
+      tags: [admins]
+      summary: Create an administrator (owner role only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Admin' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admins/{adminId}:
+    parameters:
+      - { name: adminId, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [admins]
+      summary: Delete an administrator (owner role only; cannot delete the last owner)
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /audit:
+    get:
+      tags: [audit]
+      summary: Audit log (who changed what)
+      parameters:
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditPage' }
+
+  /ws:
+    get:
+      tags: [node]
+      summary: WebSocket of live events (status ticks, path changes, failovers, logs)
+      description: Messages are JSON objects matching `Event`.
+      responses:
+        '101': { description: Switching protocols }
+
+  /healthz:
+    get:
+      tags: [node]
+      security: []
+      summary: Liveness
+      responses:
+        '200': { description: Alive }
+  /readyz:
+    get:
+      tags: [node]
+      security: []
+      summary: Readiness (the node is running)
+      responses:
+        '200': { description: Ready }
+        '503': { description: Not running }
+
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: marmot_session
+
+  parameters:
+    PeerId:
+      name: peerId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$' }
+
+  responses:
+    BadRequest:
+      description: Malformed request
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthorized:
+      description: Not logged in or wrong credentials
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: Not allowed for this role
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Conflict:
+      description: Version conflict or duplicate
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    InvalidConfig:
+      description: Configuration rejected; running config unchanged
+      content: { application/json: { schema: { $ref: '#/components/schemas/ValidationResult' } } }
+    TooManyRequests:
+      description: Rate limited
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, examples: [invalid_credentials] }
+        message: { type: string }
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+        totp: { type: string, pattern: '^[0-9]{6}$' }
+
+    Me:
+      type: object
+      required: [id, username, role, totpEnabled, csrfToken]
+      properties:
+        id: { type: string }
+        username: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        totpEnabled: { type: boolean }
+        csrfToken: { type: string }
+        locale: { type: string, enum: [fa, en] }
+
+    Role:
+      type: string
+      enum: [owner, operator, viewer]
+
+    Admin:
+      type: object
+      required: [id, username, role, totpEnabled, createdAt]
+      properties:
+        id: { type: string }
+        username: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        totpEnabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        lastLoginAt: { type: string, format: date-time }
+
+    AdminCreate:
+      type: object
+      required: [username, password, role]
+      properties:
+        username: { type: string, minLength: 3, maxLength: 32 }
+        password: { type: string, format: password, minLength: 12 }
+        role: { $ref: '#/components/schemas/Role' }
+
+    NodeStatus:
+      type: object
+      required: [nodeId, role, version, uptimeSec, sessions, streams, bytesIn, bytesOut, peers]
+      properties:
+        nodeId: { type: string }
+        role: { type: string, enum: [relay, exit, hybrid] }
+        version: { type: string }
+        uptimeSec: { type: integer }
+        sessions: { type: integer }
+        streams: { type: integer }
+        bytesIn: { type: integer }
+        bytesOut: { type: integer }
+        peers:
+          type: array
+          items: { $ref: '#/components/schemas/PeerHealth' }
+
+    Identity:
+      type: object
+      required: [nodeId, publicKey, joinToken]
+      properties:
+        nodeId: { type: string }
+        publicKey: { type: string, examples: ['ed25519:BASE64...'] }
+        joinToken:
+          type: string
+          description: Opaque, signed blob containing node id, public key and reachable endpoints
+
+    JoinRequest:
+      type: object
+      required: [joinToken]
+      properties:
+        joinToken: { type: string }
+        weight: { type: integer, minimum: 1, maximum: 100, default: 1 }
+
+    ConfigDocument:
+      type: object
+      required: [toml, version]
+      properties:
+        toml: { type: string }
+        version:
+          type: string
+          description: Hash of the current file; PUT fails with 409 if it changed meanwhile
+        warnings: { $ref: '#/components/schemas/ApplyWarnings' }
+
+    ApplyWarnings:
+      type: array
+      readOnly: true
+      items: { type: string }
+      description: >
+        Parts of a valid configuration that could not be applied (for example a
+        port held by another process). The file is saved and everything else is
+        applied (ADR-0009).
+
+    ValidationResult:
+      type: object
+      required: [valid, issues]
+      properties:
+        valid: { type: boolean }
+        issues:
+          type: array
+          items:
+            type: object
+            required: [severity, path, message]
+            properties:
+              severity: { type: string, enum: [error, warning] }
+              path: { type: string, examples: ['steering.tunneled_ports[2]'] }
+              message: { type: string }
+
+    Steering:
+      type: object
+      required: [ports]
+      properties:
+        ports:
+          type: array
+          items: { $ref: '#/components/schemas/PortRule' }
+        bypassNote:
+          type: string
+          readOnly: true
+          description: Ports not listed here are never touched by Marmot
+        warnings: { $ref: '#/components/schemas/ApplyWarnings' }
+
+    PortRule:
+      type: object
+      required: [port, class, protocols]
+      properties:
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        class: { type: string, enum: [tunneled, vip] }
+        protocols:
+          type: array
+          minItems: 1
+          items: { type: string, enum: [tcp, udp] }
+        targetPort: { type: integer, minimum: 1, maximum: 65535, description: Defaults to port }
+      description: >
+        PROXY v2 is written by the node that delivers to the panel and is set
+        there in panel_integration, not per user port (ADR-0009).
+
+    Peer:
+      type: object
+      required: [id, publicKey, endpoints]
+      properties:
+        id: { type: string }
+        publicKey: { type: string }
+        weight: { type: integer, minimum: 1, maximum: 100, default: 1 }
+        ipv4Pool: { type: array, items: { type: string, format: ipv4 } }
+        ipv6Subnet: { type: string }
+        endpoints:
+          type: array
+          items: { $ref: '#/components/schemas/Endpoint' }
+          description: Empty means the peer is inbound-only; it dials this node (ADR-0009).
+
+    Endpoint:
+      type: object
+      required: [transport, direction]
+      properties:
+        transport: { type: string, examples: [tcp, tls, ws, grpc, quic] }
+        ports: { type: array, items: { type: integer } }
+        portRange: { type: string, pattern: '^[0-9]{1,5}-[0-9]{1,5}$' }
+        direction:
+          type: string
+          enum: [outbound, inbound, both]
+          description: Only outbound is accepted until reverse transports (Phase 4).
+        family: { type: string, enum: [any, ipv4, ipv6], default: any }
+        options:
+          type: object
+          additionalProperties: true
+          description: Transport-specific options (sni, fingerprint, path, …)
+
+    PeerHealth:
+      type: object
+      required: [id, state, activePaths, rttMs, lossPct]
+      properties:
+        id: { type: string }
+        state: { type: string, enum: [up, degraded, relayed, down] }
+        activePaths: { type: integer }
+        rttMs: { type: number }
+        lossPct: { type: number, description: 0 until the adaptive controller (Phase 3) }
+
+    PeerView:
+      allOf:
+        - $ref: '#/components/schemas/Peer'
+        - type: object
+          properties:
+            health: { $ref: '#/components/schemas/PeerHealth' }
+            warnings: { $ref: '#/components/schemas/ApplyWarnings' }
+
+    PathView:
+      type: object
+      required: [id, local, remote, transport, role, rttMs, jitterMs, lossPct, throughputBps, score]
+      properties:
+        id: { type: string }
+        local: { type: string }
+        remote: { type: string }
+        transport: { type: string }
+        role: { type: string, enum: [active, standby, quarantined, probing] }
+        rttMs: { type: number }
+        jitterMs: { type: number }
+        lossPct: { type: number }
+        throughputBps: { type: integer }
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Phase 1 heuristic until the controller (ADR-0009)
+        quarantinedUntil: { type: string, format: date-time }
+
+    TrafficSeries:
+      type: object
+      required: [stepSec, points]
+      properties:
+        stepSec: { type: integer }
+        points:
+          type: array
+          items:
+            type: object
+            required: [t, bytesIn, bytesOut]
+            properties:
+              t: { type: string, format: date-time }
+              bytesIn: { type: integer }
+              bytesOut: { type: integer }
+
+    AuditPage:
+      type: object
+      required: [items]
+      properties:
+        nextCursor: { type: string }
+        items:
+          type: array
+          items:
+            type: object
+            required: [at, admin, action, target]
+            properties:
+              at: { type: string, format: date-time }
+              admin: { type: string }
+              action: { type: string, examples: [peer.delete, config.update, login.fail] }
+              target: { type: string }
+              sourceIp: { type: string }
+
+    Event:
+      type: object
+      required: [type, at]
+      properties:
+        type:
+          type: string
+          enum: [status.tick, path.state, peer.state, failover, rotation, config.applied, log]
+        at: { type: string, format: date-time }
+        data: { type: object, additionalProperties: true }

@@ -1,0 +1,61 @@
+# Merge gate from CONTRIBUTING: formatting, strict lint, race tests,
+# coverage, licence policy (ADR-0008), panel checks, chaos suite, image.
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: backend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: backend/go.mod, cache-dependency-path: backend/go.sum }
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: vet
+        run: go vet ./...
+      - name: golangci-lint
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
+      - name: test (race)
+        run: go test -race -count=1 -coverpkg=./internal/... -coverprofile=cover.out ./...
+      - name: coverage >= 80% on internal/
+        run: |
+          total=$(go tool cover -func=cover.out | awk '/^total:/ {sub("%","",$3); print $3}')
+          echo "coverage: $total%"
+          awk -v t="$total" 'BEGIN { exit (t >= 80) ? 0 : 1 }'
+      - name: licences
+        run: |
+          go install github.com/google/go-licenses/v2@latest
+          sh scripts/check-licenses.sh
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: frontend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run licenses
+      - run: npm audit --omit=dev
+
+  chaos:
+    runs-on: ubuntu-latest
+    needs: backend
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh backend/test/chaos/docker.sh
+
+  image:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f backend/Dockerfile -t marmot:ci .

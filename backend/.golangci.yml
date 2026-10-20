@@ -1,0 +1,68 @@
+# Strict lint profile; the merge gate requires zero findings (CONTRIBUTING §4).
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nolintlint
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+  settings:
+    errcheck:
+      exclude-functions:
+        # bufio.Writer errors are sticky and checked once, at Flush.
+        - (*bufio.Writer).WriteString
+        - (*bufio.Writer).WriteByte
+        # rows.Close errors surface through rows.Err, which is checked.
+        - (*database/sql.Rows).Close
+        # Command output to the terminal; nothing to do if it fails.
+        - fmt.Fprintf
+        - fmt.Fprintln
+    gocritic:
+      enabled-tags: [diagnostic, performance]
+      disabled-checks: [hugeParam]
+    gosec:
+      excludes:
+        - G115 # integer conversions are range-checked by the wire codecs
+        - G304 # config, key and certificate paths come from the operator by design
+        - G104 # unchecked errors are errcheck's job, with the exclusions above
+    govet:
+      enable-all: true
+      disable: [fieldalignment, shadow]
+    revive:
+      rules:
+        - name: exported
+        - name: var-naming
+        - name: indent-error-flow
+        - name: error-strings
+        - name: receiver-naming
+    nolintlint:
+      require-specific: true
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec, errcheck, gocritic, bodyclose]
+      - path: test/chaos/
+        linters: [gosec]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes: [marmot]

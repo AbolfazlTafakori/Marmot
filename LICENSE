@@ -1,0 +1,32 @@
+Marmot Proprietary License
+
+Copyright (c) 2026 [COPYRIGHT HOLDER]. All rights reserved.
+
+1. Ownership. The software in this repository, including source code, object
+   code, documentation, designs and associated files (the "Software"), is the
+   exclusive property of the copyright holder.
+
+2. No licence by default. No right to use, copy, modify, merge, publish,
+   distribute, sublicense, sell, or create derivative works of the Software is
+   granted to anyone except under a separate written agreement signed by the
+   copyright holder.
+
+3. Authorised contributors. Persons and automated tools engaged by the
+   copyright holder to develop the Software may access and modify it solely for
+   that purpose. All contributions become the property of the copyright holder.
+
+4. Restrictions. Except as permitted in writing, you may not: (a) disclose the
+   source code to third parties; (b) reverse engineer, decompile or
+   disassemble binaries, except to the extent applicable law expressly permits;
+   (c) remove or alter this notice.
+
+5. Third-party components. Components distributed with the Software that are
+   licensed by third parties remain subject to their own licences, listed in
+   THIRD_PARTY_NOTICES.
+
+6. No warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY
+   CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE.
+
+7. Termination. Any breach of these terms terminates every right granted under
+   them immediately.

@@ -1,0 +1,4 @@
+# One line ending everywhere; gofmt and the shell scripts need LF.
+* text=auto eol=lf
+*.png binary
+*.woff2 binary

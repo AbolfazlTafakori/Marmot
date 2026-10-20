@@ -1,0 +1,25 @@
+# Build output
+/backend/marmot
+/backend/marmot.exe
+*.test
+*.out
+frontend/dist/
+frontend/node_modules/
+*.tsbuildinfo
+
+# Keys, local config and data must never be committed
+*.key
+*.pem
+*.crt
+*.db
+*.db-wal
+*.db-shm
+deploy/data/
+deploy/etc/*
+!deploy/etc/marmot.toml.example
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
