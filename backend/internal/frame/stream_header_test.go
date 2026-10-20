@@ -148,3 +148,43 @@ func TestExitHeaderInvalid(t *testing.T) {
 		t.Fatal("version 3 accepted")
 	}
 }
+
+func TestPathHeaderRoundTrip(t *testing.T) {
+	for _, route := range [][]core.NodeID{nil, {"kharej-1"}, {"relay-2", "kharej-1"}} {
+		h := StreamHeader{Path: true, Route: route}
+		b, err := h.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b[0] != StreamHeaderVersionPath || int(b[1]) != len(route) {
+			t.Fatalf("encoding %x", b)
+		}
+		got, err := ReadStreamHeader(bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, h) {
+			t.Fatalf("got %+v want %+v", got, h)
+		}
+	}
+}
+
+func TestPathHeaderInvalid(t *testing.T) {
+	bad := []StreamHeader{
+		{Path: true, TargetPort: 443},
+		{Path: true, Proto: core.ProtoTCP},
+		{Path: true, Client: netip.MustParseAddrPort("1.2.3.4:5")},
+		{Path: true, Route: []core.NodeID{"a", "b", "c", "d", "e"}},
+		{Path: true, Route: []core.NodeID{""}},
+	}
+	for i, h := range bad {
+		if _, err := h.MarshalBinary(); err == nil {
+			t.Errorf("case %d accepted", i)
+		}
+	}
+	for _, b := range [][]byte{{3, 5}, {3, 1, 0}, {3, 1, 3, 'a'}, {3}} {
+		if _, err := ReadStreamHeader(bytes.NewReader(b)); err == nil {
+			t.Errorf("ReadStreamHeader(%v) accepted", b)
+		}
+	}
+}

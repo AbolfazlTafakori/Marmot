@@ -43,7 +43,7 @@ func (o exitOpener) Datagram(ctx context.Context, dst socks5.Addr, client netip.
 	return o.open(ctx, core.ProtoUDP, dst, client)
 }
 
-// open tries peers in weighted order. A peer that refuses exit by policy
+// open tries peers in the scheduler's order. A peer that refuses exit by policy
 // (its role does not allow it) is skipped; any other answer is final,
 // because another exit would reach the same destination the same way.
 func (o exitOpener) open(ctx context.Context, proto core.Proto, dst socks5.Addr, client netip.AddrPort) (io.ReadWriteCloser, error) {
@@ -51,13 +51,9 @@ func (o exitOpener) open(ctx context.Context, proto core.Proto, dst socks5.Addr,
 		Proto: proto, Class: core.ClassTunneled, TargetPort: dst.Port, Client: client,
 		Dest: frame.Destination{IP: dst.IP, Host: dst.Host, Port: dst.Port},
 	}
-	cands := o.n.routeCandidates(nil, proto)
 	var lastErr error = &socksError{rep: socks5.RepNetworkUnreachable, err: ErrNoRoute}
-	for len(cands) > 0 {
-		i := weightedPick(cands)
-		c := cands[i]
-		cands = append(cands[:i], cands[i+1:]...)
-		st, err := c.s.OpenStream(ctx, h)
+	for _, s := range o.n.route(nil, proto, h.Class) {
+		st, err := s.OpenStream(ctx, h)
 		if err != nil {
 			lastErr = &socksError{rep: socks5.RepGeneralFailure, err: err}
 			continue
@@ -74,10 +70,10 @@ func (o exitOpener) open(ctx context.Context, proto core.Proto, dst socks5.Addr,
 		_ = st.Close()
 		var re *session.ReplyError
 		if errors.As(err, &re) && re.Code == frame.ReplyDenied {
-			lastErr = &socksError{rep: socks5.RepNotAllowed, err: fmt.Errorf("peer %s: %w", c.s.Peer(), err)}
+			lastErr = &socksError{rep: socks5.RepNotAllowed, err: fmt.Errorf("peer %s: %w", s.Peer(), err)}
 			continue
 		}
-		return nil, &socksError{rep: socksReplyFor(err), err: fmt.Errorf("peer %s: %w", c.s.Peer(), err)}
+		return nil, &socksError{rep: socksReplyFor(err), err: fmt.Errorf("peer %s: %w", s.Peer(), err)}
 	}
 	return nil, lastErr
 }

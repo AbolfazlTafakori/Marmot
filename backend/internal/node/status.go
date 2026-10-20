@@ -11,11 +11,11 @@ import (
 	"marmot/internal/steering"
 )
 
-// Peer states, as in the API's PeerHealth schema. "relayed" arrives with
-// relay routing in Phase 2.
+// Peer states, as in the API's PeerHealth schema.
 const (
 	PeerUp       = "up"
 	PeerDegraded = "degraded"
+	PeerRelayed  = "relayed" // up, but only through a relay node
 	PeerDown     = "down"
 )
 
@@ -30,6 +30,13 @@ type Status struct {
 	Ports     []steering.PortStatus
 	Listeners []ListenerStatus
 	Forwarder forwarder.Stats
+	Transit   TransitStatus
+}
+
+// TransitStatus counts relayed paths passing through this node.
+type TransitStatus struct {
+	Active int64
+	Bytes  uint64 // of relayed paths that have ended
 }
 
 // PeerStatus is the health of one configured peer. BytesSent and
@@ -96,13 +103,7 @@ func (n *Node) Snapshot() Status {
 			ps.BytesSent += s.BytesSent
 			ps.BytesRecv += s.BytesRecv
 		}
-		for _, s := range ps.Sessions {
-			if s.Ready {
-				ps.State = PeerUp
-				break
-			}
-			ps.State = PeerDegraded
-		}
+		ps.State = peerState(ps.Sessions)
 		st.Peers = append(st.Peers, ps)
 	}
 	st.Ports = n.steering.Ports()
@@ -111,7 +112,37 @@ func (n *Node) Snapshot() Status {
 	}
 	sort.Slice(st.Listeners, func(i, j int) bool { return st.Listeners[i].Addr < st.Listeners[j].Addr })
 	st.Forwarder = n.forwarder.Stats()
+	st.Transit = TransitStatus{Active: n.transit.Load(), Bytes: n.transitBytes.Load()}
 	return st
+}
+
+// peerState is up when a ready session runs on a direct path, relayed when
+// ready sessions run only through relays, degraded when no session is
+// ready, and down without sessions.
+func peerState(ss []SessionStatus) string {
+	state := PeerDown
+	for _, s := range ss {
+		switch {
+		case !s.Ready:
+			if state == PeerDown {
+				state = PeerDegraded
+			}
+		case s.relayed():
+			state = PeerRelayed
+		default:
+			return PeerUp
+		}
+	}
+	return state
+}
+
+func (s *SessionStatus) relayed() bool {
+	for i := range s.Paths {
+		if s.Paths[i].Active {
+			return isRelayed(s.Paths[i].Meta)
+		}
+	}
+	return false
 }
 
 func live(s *session.MuxSession) bool {

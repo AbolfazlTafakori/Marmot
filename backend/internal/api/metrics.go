@@ -20,6 +20,7 @@ func Metrics(n *node.Node) []telemetry.Metric {
 		up = 1
 	}
 	peerUp := telemetry.Metric{Name: "marmot_peer_up", Help: "1 if the peer has a ready session.", Type: telemetry.Gauge}
+	peerRelayed := telemetry.Metric{Name: "marmot_peer_relayed", Help: "1 if the peer is reached only through a relay node.", Type: telemetry.Gauge}
 	sessions := telemetry.Metric{Name: "marmot_sessions", Help: "Open sessions per peer.", Type: telemetry.Gauge}
 	paths := telemetry.Metric{Name: "marmot_paths", Help: "Live paths per peer and role.", Type: telemetry.Gauge}
 	rtt := telemetry.Metric{Name: "marmot_path_rtt_seconds", Help: "Smoothed RTT of the active path.", Type: telemetry.Gauge}
@@ -27,11 +28,15 @@ func Metrics(n *node.Node) []telemetry.Metric {
 	bytes := telemetry.Metric{Name: "marmot_peer_bytes_total", Help: "Bytes exchanged with a peer since start.", Type: telemetry.Counter}
 	for _, p := range st.Peers {
 		id := string(p.ID)
-		v := 0.0
-		if p.State == node.PeerUp {
+		v, relayed := 0.0, 0.0
+		if p.State == node.PeerUp || p.State == node.PeerRelayed {
 			v = 1
 		}
+		if p.State == node.PeerRelayed {
+			relayed = 1
+		}
 		peerUp.Samples = append(peerUp.Samples, telemetry.Sample{Labels: map[string]string{"peer": id}, Value: v})
+		peerRelayed.Samples = append(peerRelayed.Samples, telemetry.Sample{Labels: map[string]string{"peer": id}, Value: relayed})
 		var active, standby, nstreams int
 		for _, ss := range p.Sessions {
 			nstreams += ss.Streams
@@ -78,7 +83,7 @@ func Metrics(n *node.Node) []telemetry.Metric {
 		{Name: "marmot_go_sys_bytes", Help: "Bytes obtained from the OS.", Type: telemetry.Gauge,
 			Samples: []telemetry.Sample{{Value: float64(ms.Sys)}}},
 		{Name: "marmot_up", Help: "1 if the node is running.", Type: telemetry.Gauge, Samples: []telemetry.Sample{{Value: up}}},
-		peerUp, sessions, paths, rtt, streams, bytes, portBytes, portConns,
+		peerUp, peerRelayed, sessions, paths, rtt, streams, bytes, portBytes, portConns,
 		{Name: "marmot_failovers_total", Help: "Active path failures that caused a failover.", Type: telemetry.Counter,
 			Samples: []telemetry.Sample{{Value: float64(counts[node.EventFailover])}}},
 		{Name: "marmot_rotations_total", Help: "Make-before-break path rotations.", Type: telemetry.Counter,
@@ -87,5 +92,9 @@ func Metrics(n *node.Node) []telemetry.Metric {
 			Samples: []telemetry.Sample{{Value: float64(st.Forwarder.Streams)}}},
 		{Name: "marmot_refused_streams_total", Help: "Streams refused (target down or policy).", Type: telemetry.Counter,
 			Samples: []telemetry.Sample{{Value: float64(st.Forwarder.Refused)}}},
+		{Name: "marmot_relay_transit_paths", Help: "Relayed paths of other nodes passing through this node.", Type: telemetry.Gauge,
+			Samples: []telemetry.Sample{{Value: float64(st.Transit.Active)}}},
+		{Name: "marmot_relay_transit_bytes_total", Help: "Bytes of ended relayed paths that passed through this node.", Type: telemetry.Counter,
+			Samples: []telemetry.Sample{{Value: float64(st.Transit.Bytes)}}},
 	}
 }

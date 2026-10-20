@@ -7,6 +7,7 @@ import (
 
 	"marmot/internal/config"
 	"marmot/internal/core"
+	"marmot/internal/mesh"
 	"marmot/internal/transport"
 )
 
@@ -82,7 +83,7 @@ func (n *Node) applyLinks(prev, next *config.Config) {
 			continue
 		}
 		key, _ := keys.KeyOf(id)
-		cands, skipped := candidates(p, localV4(next), transportKnown)
+		cands, skipped := mesh.Expand(peerSpec(&p), locals(next), transportKnown)
 		for _, t := range skipped {
 			n.log.Warn("transport not available in this build; endpoint skipped", "peer", p.ID, "transport", t)
 		}
@@ -112,15 +113,34 @@ func (n *Node) linkDeps(c *config.Config) linkDeps {
 		rotateInterval: c.Session.RotateInterval.D(),
 		events:         n.events,
 		serve:          n.serveSession,
+		relayVias:      n.relayVias,
+		dialRelay:      n.dialRelay,
 		log:            n.log.With("component", "link"),
 	}
 }
 
-func localV4(c *config.Config) []netip.Addr {
-	out := make([]netip.Addr, 0, len(c.Local.IPv4Pool))
-	for _, s := range c.Local.IPv4Pool {
-		if a, err := netip.ParseAddr(s); err == nil {
-			out = append(out, a)
+func locals(c *config.Config) mesh.Locals {
+	return mesh.Locals{V4: parseAddrs(c.Local.IPv4Pool), V6: parseAddrs(c.Local.IPv6Pool)}
+}
+
+// peerSpec translates a peer's addresses and endpoints for mesh. The IPv6
+// /64 is not dialed before Phase 4 (ADR-0011).
+func peerSpec(p *config.Peer) mesh.PeerSpec {
+	spec := mesh.PeerSpec{Addrs: append(parseAddrs(p.IPv4Pool), parseAddrs(p.IPv6Pool)...)}
+	for _, e := range p.Endpoints {
+		spec.Endpoints = append(spec.Endpoints, mesh.Endpoint{
+			Transport: e.Transport, Ports: e.Ports, PortRange: [2]uint16{e.PortRange.Lo, e.PortRange.Hi},
+			Family: mesh.ParseFamily(e.Family), Options: e.Options,
+		})
+	}
+	return spec
+}
+
+func parseAddrs(ss []string) []netip.Addr {
+	out := make([]netip.Addr, 0, len(ss))
+	for _, s := range ss {
+		if a, err := netip.ParseAddr(s); err == nil { // validated already
+			out = append(out, a.Unmap())
 		}
 	}
 	return out

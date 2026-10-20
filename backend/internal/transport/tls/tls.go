@@ -56,11 +56,28 @@ var fingerprints = map[string]utls.ClientHelloID{
 
 // Dial implements transport.Transport.
 func (Transport) Dial(ctx context.Context, ep transport.Endpoint, local netip.Addr) (transport.Conn, error) {
-	sni, err := transport.StringOption(ep.Options, "sni", "")
+	raw, err := tcp.DialTCP(ctx, ep.Addr, local)
 	if err != nil {
 		return nil, err
 	}
-	fpName, err := transport.StringOption(ep.Options, "fingerprint", "chrome")
+	uc, err := Client(ctx, raw, ep.Options, nil)
+	if err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("tls handshake %s: %w", ep.Addr, err)
+	}
+	return uc, nil
+}
+
+// Client runs a uTLS client handshake on raw with the endpoint options sni
+// and fingerprint. alpn, when set, replaces the fingerprint's ALPN list
+// (ws needs http/1.1 only, grpc h2 only). Other transports that run over
+// TLS use it. raw is not closed on error.
+func Client(ctx context.Context, raw net.Conn, opts map[string]any, alpn []string) (*utls.UConn, error) {
+	sni, err := transport.StringOption(opts, "sni", "")
+	if err != nil {
+		return nil, err
+	}
+	fpName, err := transport.StringOption(opts, "fingerprint", "chrome")
 	if err != nil {
 		return nil, err
 	}
@@ -68,36 +85,66 @@ func (Transport) Dial(ctx context.Context, ep transport.Endpoint, local netip.Ad
 	if !ok {
 		return nil, fmt.Errorf("tls: unknown fingerprint %q", fpName)
 	}
-	raw, err := tcp.DialTCP(ctx, ep.Addr, local)
-	if err != nil {
-		return nil, err
-	}
-	uc := utls.UClient(raw, &utls.Config{
+	conf := &utls.Config{
 		ServerName: sni,
 		// See the package comment: Noise authenticates the peer.
 		InsecureSkipVerify: true,
-	}, fp)
+	}
+	var uc *utls.UConn
+	if alpn == nil {
+		uc = utls.UClient(raw, conf, fp)
+	} else {
+		spec, err := utls.UTLSIdToSpec(fp)
+		if err != nil {
+			return nil, fmt.Errorf("tls: fingerprint %q: %w", fpName, err)
+		}
+		setALPN(&spec, alpn)
+		uc = utls.UClient(raw, conf, utls.HelloCustom)
+		if err := uc.ApplyPreset(&spec); err != nil {
+			return nil, fmt.Errorf("tls: fingerprint %q: %w", fpName, err)
+		}
+	}
 	if err := uc.HandshakeContext(ctx); err != nil {
-		_ = raw.Close()
-		return nil, fmt.Errorf("tls handshake %s: %w", ep.Addr, err)
+		return nil, err
 	}
 	return uc, nil
 }
 
+// setALPN replaces the ALPN list of spec, adding the extension if the
+// fingerprint has none.
+func setALPN(spec *utls.ClientHelloSpec, alpn []string) {
+	for _, e := range spec.Extensions {
+		if a, ok := e.(*utls.ALPNExtension); ok {
+			a.AlpnProtocols = alpn
+			return
+		}
+	}
+	spec.Extensions = append(spec.Extensions, &utls.ALPNExtension{AlpnProtocols: alpn})
+}
+
+// ServerConfig returns the server TLS config from listen options
+// cert_file, key_file and sni (see loadCertificate), offering nextProtos.
+func ServerConfig(opts map[string]any, nextProtos []string) (*stdtls.Config, error) {
+	cert, err := loadCertificate(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &stdtls.Config{
+		Certificates: []stdtls.Certificate{cert},
+		MinVersion:   stdtls.VersionTLS12,
+		NextProtos:   nextProtos,
+	}, nil
+}
+
 // Listen implements transport.Transport.
 func (Transport) Listen(ctx context.Context, cfg transport.ListenConfig) (transport.Listener, error) {
-	cert, err := loadCertificate(cfg.Options)
+	conf, err := ServerConfig(cfg.Options, []string{"h2", "http/1.1"})
 	if err != nil {
 		return nil, err
 	}
 	l, err := tcp.ListenTCP(ctx, cfg.Addr)
 	if err != nil {
 		return nil, err
-	}
-	conf := &stdtls.Config{
-		Certificates: []stdtls.Certificate{cert},
-		MinVersion:   stdtls.VersionTLS12,
-		NextProtos:   []string{"h2", "http/1.1"},
 	}
 	return &listener{TCPListener: l, conf: conf}, nil
 }

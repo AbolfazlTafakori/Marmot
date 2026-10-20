@@ -10,24 +10,42 @@ interface EndpointDraft {
   transport: string;
   ports: string;
   sni: string;
+  /** ws path or grpc service; other transports have none. */
+  extra: string;
 }
 
-// Transports in this build (Phase 1). Others arrive with later phases.
-const transports = ['tls', 'tcp'];
+// Transports in this build (Phase 2). quic arrives with Phase 3.
+const transports = ['tls', 'tcp', 'ws', 'grpc'];
+
+/** The option each transport keeps in the extra field. */
+const extraOption: Record<string, string | undefined> = { ws: 'path', grpc: 'service' };
+
+const usesTLS = (t: string) => t !== 'tcp';
+
+function optionString(e: Endpoint, key: string | undefined): string {
+  const v = key ? e.options?.[key] : undefined;
+  return typeof v === 'string' ? v : '';
+}
 
 function toDraft(e: Endpoint): EndpointDraft {
-  const sni = e.options?.sni;
   return {
     transport: e.transport,
     ports: (e.ports ?? []).join(', '),
-    sni: typeof sni === 'string' ? sni : '',
+    sni: optionString(e, 'sni'),
+    extra: optionString(e, extraOption[e.transport]),
   };
 }
 
 function fromDraft(d: EndpointDraft, base?: Endpoint): Endpoint {
-  const options: Record<string, unknown> = { ...(base?.options ?? {}) };
-  if (d.sni) options.sni = d.sni;
+  // Keep options this form does not edit; drop path/service of another
+  // transport so a changed transport carries none of them.
+  const options: Record<string, unknown> = Object.fromEntries(
+    Object.entries(base?.options ?? {}).filter(([k]) => k !== 'path' && k !== 'service'),
+  );
+  if (d.sni && usesTLS(d.transport)) options.sni = d.sni;
   else delete options.sni;
+  const extraKey = extraOption[d.transport];
+  if (extraKey && d.extra) options[extraKey] = d.extra;
   return {
     transport: d.transport,
     direction: 'outbound',
@@ -57,16 +75,18 @@ export function PeerForm({
   const [publicKey, setPublicKey] = useState(initial?.publicKey ?? '');
   const [weight, setWeight] = useState(String(initial?.weight ?? 1));
   const [pool, setPool] = useState((initial?.ipv4Pool ?? []).join(', '));
+  const [pool6, setPool6] = useState((initial?.ipv6Pool ?? []).join(', '));
   const [endpoints, setEndpoints] = useState<EndpointDraft[]>((initial?.endpoints ?? []).map(toDraft));
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    const ipv6Pool = pool6.split(/[,\s]+/).filter(Boolean);
     onSubmit({
       id: id.trim(),
       publicKey: publicKey.trim(),
       weight: Number(weight) || 1,
       ipv4Pool: pool.split(/[,\s]+/).filter(Boolean),
-      ...(initial?.ipv6Pool?.length ? { ipv6Pool: initial.ipv6Pool } : {}),
+      ...(ipv6Pool.length ? { ipv6Pool } : {}),
       ...(initial?.ipv6Subnet ? { ipv6Subnet: initial.ipv6Subnet } : {}),
       endpoints: endpoints.map((d, i) => fromDraft(d, initial?.endpoints[i])),
     });
@@ -114,20 +134,31 @@ export function PeerForm({
           }}
         />
       </Field>
-      <Field label={m.peers.ipv4Pool} hint={m.peers.ipv4Hint}>
-        <Input
-          ltr
-          value={pool}
-          onChange={(e) => {
-            setPool(e.target.value);
-          }}
-        />
-      </Field>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label={m.peers.ipv4Pool} hint={m.peers.ipv4Hint}>
+          <Input
+            ltr
+            value={pool}
+            onChange={(e) => {
+              setPool(e.target.value);
+            }}
+          />
+        </Field>
+        <Field label={m.peers.ipv6Pool} hint={m.peers.ipv4Hint}>
+          <Input
+            ltr
+            value={pool6}
+            onChange={(e) => {
+              setPool6(e.target.value);
+            }}
+          />
+        </Field>
+      </div>
       <fieldset className="space-y-2">
         <legend className="text-sm font-medium">{m.peers.endpoints}</legend>
         {endpoints.length === 0 && <p className="text-xs text-stone-500">{m.peers.inboundOnly}</p>}
         {endpoints.map((d, i) => (
-          <div key={i} className="grid items-end gap-2 sm:grid-cols-[7rem_1fr_1fr_auto]">
+          <div key={i} className="grid items-end gap-2 sm:grid-cols-[7rem_1fr_1fr_1fr_auto]">
             <Field label={m.peers.transport}>
               <Select
                 value={d.transport}
@@ -156,10 +187,21 @@ export function PeerForm({
             <Field label={m.peers.sni}>
               <Input
                 ltr
-                disabled={d.transport !== 'tls'}
+                disabled={!usesTLS(d.transport)}
                 value={d.sni}
                 onChange={(e) => {
                   setEp(i, { sni: e.target.value });
+                }}
+              />
+            </Field>
+            <Field label={d.transport === 'grpc' ? m.peers.grpcService : m.peers.wsPath}>
+              <Input
+                ltr
+                disabled={!extraOption[d.transport]}
+                placeholder={d.transport === 'grpc' ? 'marmot.Tunnel' : '/'}
+                value={d.extra}
+                onChange={(e) => {
+                  setEp(i, { extra: e.target.value });
                 }}
               />
             </Field>
@@ -176,7 +218,7 @@ export function PeerForm({
         <Button
           variant="secondary"
           onClick={() => {
-            setEndpoints([...endpoints, { transport: 'tls', ports: '', sni: '' }]);
+            setEndpoints([...endpoints, { transport: 'tls', ports: '', sni: '', extra: '' }]);
           }}
         >
           {m.peers.addEndpoint}

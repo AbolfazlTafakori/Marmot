@@ -157,7 +157,7 @@ type PacketConn interface {  // Datagram kind: unreliable messages
 ## 7. L1 — Mesh, paths, routing
 
 ### 7.1 Path
-`Path = (local addr, peer endpoint, transport)`. The path manager builds the **cartesian product** of local addresses × peer endpoints × enabled transports, filtered by address family, and keeps a configurable number of them warm.
+`Path = (local addr, peer endpoint, transport)`. The path manager builds the **cartesian product** of local addresses × peer endpoints × enabled transports, filtered by address family, and keeps a configurable number of them warm. Standbys are chosen to differ from the paths already up (family, peer address, local address, transport, port, in that order), and a route that fails to dial or handshake is quarantined with exponential backoff ([ADR-0011](adr/0011-mesh-paths-dual-stack.md)).
 
 ### 7.2 Probing
 Every path carries `PING/PONG` frames (default every 1 s, jittered). Per path we keep EWMA RTT, RTT variance, loss rate, throughput, and consecutive-failure count. These feed the Adaptive Controller (§11).
@@ -166,7 +166,7 @@ Every path carries `PING/PONG` frames (default every 1 s, jittered). Per path we
 Each endpoint has `direction = outbound | inbound | both`. If Iran→Foreign is blocked but Foreign→Iran works, the foreign node dials and the session is established the same way. The session layer does not care who dialed.
 
 ### 7.4 Relay routing
-When no direct path to a peer is healthy, `mesh.Router` looks for a route through another node (max 2 hops by default). Relay is **source-routed**: the `OPEN` frame carries the hop list; intermediate nodes forward the stream without decrypting the end-to-end payload (inner session keys are end-to-end, see §12).
+When no direct path to a peer is up, the peer's link tries a route through another node (max 2 hops by default). Relay is **source-routed** and carries a *path* of the end-to-end session, not user streams: the origin opens a path stream whose header lists the hops, each relay opens the next one and pipes bytes, and the target hands it to its session acceptor. The Noise handshake and records of the end-to-end session run inside, so relays never see user bytes (§12), and moving between relayed and direct paths is ordinary session failover ([ADR-0012](adr/0012-relay-path-streams.md)).
 
 ### 7.5 IPv6 /64 rotation and multi-IP
 Local and remote address pools are first-class. For an IPv6 `/64`, the path manager derives addresses deterministically per rotation epoch (both sides compute the same set from the shared session secret), so the set of active addresses changes over time without signalling. Requires the subnet to be routed to the host (documented in ops guide).
@@ -277,13 +277,13 @@ Marmot/
 │   │   ├── forwarder/         # receiving-side dialer + pipe
 │   │   ├── session/           # Session/Stream interfaces, v1 mux, v2 later
 │   │   ├── frame/             # wire format codec
-│   │   ├── scheduler/         # path selection, VIP duplication
+│   │   ├── scheduler/         # which session carries a stream; VIP duplication (v2)
 │   │   ├── fec/               # Reed-Solomon blocks
-│   │   ├── mesh/              # peer, endpoint, path, pathmanager, router
+│   │   ├── mesh/              # candidates, diversity, quarantine (ADR-0011)
 │   │   ├── controller/        # adaptive controller (pure logic)
 │   │   ├── crypto/            # identity, noise handshake, rotation
 │   │   ├── transport/         # interface + registry
-│   │   │   ├── tcp/ tls/ ws/ grpc/ quic/
+│   │   │   ├── tcp/ tls/ ws/ grpc/ quic/  (httpx/: shared by ws and grpc)
 │   │   ├── api/               # HTTP handlers, auth, ws hub
 │   │   ├── store/             # SQLite: users, audit
 │   │   └── telemetry/         # slog setup, prometheus
@@ -353,10 +353,12 @@ Merge gate: `gofmt`, `golangci-lint` (strict profile), all tests with `-race`, c
 
 Each phase ends with the chaos suite green before the next begins (`backend/test/chaos/`, run with `make chaos`).
 
-**Phase 1 status: done.** All Phase 1 packages are implemented and tested; the chaos suite passes (a verified 30 s stream survives each route being blackholed in turn). Notes for Phase 2:
-- `node` holds a small per-peer link (`peer_link.go`) that dials, keeps hot standbys and rotates paths; `mesh` replaces it.
-- `node.Open` picks a peer by weight; the `scheduler` replaces it.
-- Session v1 failover stalls for up to `max(4 × probe_interval, 3 s)`, the time to declare a path dead (ADR-0003 accepts this for v1).
+**Phase 1 status: done.** All Phase 1 packages are implemented and tested; the chaos suite passes (a verified 30 s stream survives each route being blackholed in turn).
+
+**Phase 2 status: done.** `mesh` (candidates over IPv4 and IPv6, diverse standbys, quarantine; ADR-0011), relay routing as end-to-end session paths (ADR-0012), `scheduler` (direct before relayed; tunneled by weight, VIP by latency), exit mode with `socks5` (ADR-0010), and the `ws` and `grpc` transports. The chaos suite adds a three-node scenario: a verified 60 s stream survives tls over IPv4, tls over IPv6, ws and grpc being blackholed in turn until only the relay is left, and the session returns to a direct path when they come back. Notes for Phase 3:
+- `node/peer_link.go` drives one outbound session per peer with a `mesh.Planner`; the controller replaces the fixed diversity weights with measured scores (ADR-0011 §Consequences).
+- VIP duplication needs session v2; in v1 the scheduler only puts VIP streams on the lowest-RTT session.
+- Session v1 failover still stalls for up to `max(4 × probe_interval, 3 s)`, plus a dial timeout when the next route must be dialed.
 - Invariant in `session`: a path's reader never writes to the path; control writes go through its control loop. Breaking it deadlocks two full pipes.
 
 ---

@@ -21,6 +21,7 @@ type joinPayload struct {
 	NodeID     string         `json:"id"`
 	PublicKey  string         `json:"pk"`
 	IPv4Pool   []string       `json:"ipv4,omitempty"`
+	IPv6Pool   []string       `json:"ipv6pool,omitempty"`
 	IPv6Subnet string         `json:"ipv6,omitempty"`
 	Endpoints  []joinEndpoint `json:"endpoints,omitempty"`
 	IssuedAt   int64          `json:"iat"`
@@ -34,25 +35,37 @@ type joinEndpoint struct {
 
 var errBadToken = errors.New("join token is malformed or its signature does not match")
 
-// makeJoinToken describes this node from its configuration. Only the sni
-// option of a listener is exported; certificate paths stay private.
+// exportedOptions are the listener options a dialer needs to match: the
+// TLS server name, the WebSocket path, the gRPC service and whether TLS is
+// on. Certificate paths stay private.
+var exportedOptions = []string{"sni", "path", "service", "tls"}
+
+// makeJoinToken describes this node from its configuration.
 func makeJoinToken(c *config.Config, pub ed25519.PublicKey, sign func([]byte) []byte, now time.Time) (string, error) {
 	p := joinPayload{V: 1, NodeID: c.Node.ID, PublicKey: config.FormatPublicKey(pub),
-		IPv4Pool: c.Local.IPv4Pool, IPv6Subnet: c.Local.IPv6Subnet, IssuedAt: now.Unix()}
-	byTransport := map[string]int{}
+		IPv4Pool: c.Local.IPv4Pool, IPv6Pool: c.Local.IPv6Pool, IPv6Subnet: c.Local.IPv6Subnet, IssuedAt: now.Unix()}
+	// Listeners of one transport with the same options become one
+	// endpoint with several ports.
+	byKey := map[string]int{}
 	for _, tl := range c.TransportListen {
 		if tl.Port == 0 {
 			continue
 		}
-		i, ok := byTransport[tl.Transport]
+		var opts map[string]any
+		for _, k := range exportedOptions {
+			if v, ok := tl.Options[k]; ok && v != "" {
+				if opts == nil {
+					opts = map[string]any{}
+				}
+				opts[k] = v
+			}
+		}
+		key, _ := json.Marshal([]any{tl.Transport, opts}) // map keys marshal sorted
+		i, ok := byKey[string(key)]
 		if !ok {
 			i = len(p.Endpoints)
-			byTransport[tl.Transport] = i
-			e := joinEndpoint{Transport: tl.Transport}
-			if sni, ok := tl.Options["sni"].(string); ok && sni != "" {
-				e.Options = map[string]any{"sni": sni}
-			}
-			p.Endpoints = append(p.Endpoints, e)
+			byKey[string(key)] = i
+			p.Endpoints = append(p.Endpoints, joinEndpoint{Transport: tl.Transport, Options: opts})
 		}
 		p.Endpoints[i].Ports = append(p.Endpoints[i].Ports, tl.Port)
 	}
@@ -91,10 +104,10 @@ func parseJoinToken(token string, weight int) (config.Peer, error) {
 		return config.Peer{}, errBadToken
 	}
 	peer := config.Peer{ID: p.NodeID, PublicKey: p.PublicKey, Weight: weight,
-		IPv4Pool: p.IPv4Pool, IPv6Subnet: p.IPv6Subnet}
+		IPv4Pool: p.IPv4Pool, IPv6Pool: p.IPv6Pool, IPv6Subnet: p.IPv6Subnet}
 	// Without an address the endpoints cannot be dialed; the peer is then
 	// inbound-only and dials us.
-	if len(p.IPv4Pool) > 0 || p.IPv6Subnet != "" {
+	if len(p.IPv4Pool) > 0 || len(p.IPv6Pool) > 0 || p.IPv6Subnet != "" {
 		for _, e := range p.Endpoints {
 			peer.Endpoints = append(peer.Endpoints, config.Endpoint{Transport: e.Transport, Ports: e.Ports, Options: e.Options})
 		}

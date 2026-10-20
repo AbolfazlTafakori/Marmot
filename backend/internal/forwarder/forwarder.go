@@ -124,8 +124,9 @@ func (f *Forwarder) Serve(ctx context.Context, st session.Stream, h frame.Stream
 func (f *Forwarder) check(p *Policy, h frame.StreamHeader) byte {
 	switch {
 	case len(h.Route) > 0:
-		// Relay transit arrives with session routing in Phase 2.
-		f.log.Warn("relay route requested but transit is not available", "route", h.Route)
+		// User streams always run end to end; relays carry path streams
+		// (ADR-0012), which node handles before the forwarder.
+		f.log.Warn("user stream with a relay route denied", "route", h.Route)
 		return frame.ReplyDenied
 	case h.Dest.IsZero() && p.DeniedPorts[h.TargetPort]:
 		f.log.Warn("stream to a protected port denied", "port", h.TargetPort)

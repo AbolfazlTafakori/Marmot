@@ -10,10 +10,12 @@ import (
 )
 
 // Stream header versions: 1 for relay streams, 2 for exit streams that
-// carry a destination (spec §6.2, ADR-0010).
+// carry a destination (spec §6.2, ADR-0010), 3 for path streams that carry
+// a session path through relay nodes (spec §7, ADR-0012).
 const (
 	StreamHeaderVersion     = 1
 	StreamHeaderVersionExit = 2
+	StreamHeaderVersionPath = 3
 )
 
 // Destination address types of an exit stream.
@@ -45,6 +47,10 @@ type StreamHeader struct {
 	Client     netip.AddrPort
 	Route      []core.NodeID // remaining relay hops; empty = deliver locally
 	Dest       Destination   // set for exit streams; zero for relay streams
+	// Path marks a path stream: its bytes are a session path to the last
+	// node of the route, which hands it to its session acceptor. A path
+	// header carries only the route; the other fields are zero.
+	Path bool
 }
 
 // Destination is where an exit stream goes: an IP address or a domain
@@ -82,6 +88,12 @@ func validHost(h string) bool {
 
 // MarshalBinary encodes the header.
 func (h *StreamHeader) MarshalBinary() ([]byte, error) {
+	if h.Path {
+		if h.Proto != 0 || h.Class != 0 || h.TargetPort != 0 || h.Client.IsValid() || !h.Dest.IsZero() {
+			return nil, ErrBadStreamHeader
+		}
+		return appendRoute([]byte{StreamHeaderVersionPath}, h.Route)
+	}
 	if !h.Proto.Valid() || !h.Class.Valid() || h.TargetPort == 0 || len(h.Route) > MaxRouteHops {
 		return nil, ErrBadStreamHeader
 	}
@@ -106,18 +118,52 @@ func (h *StreamHeader) MarshalBinary() ([]byte, error) {
 	}
 	b = append(b, addr.AsSlice()...)
 	b = binary.BigEndian.AppendUint16(b, h.Client.Port())
-	b = append(b, byte(len(h.Route)))
-	for _, hop := range h.Route {
+	b, err := appendRoute(b, h.Route)
+	if err != nil {
+		return nil, err
+	}
+	if version == StreamHeaderVersionExit {
+		b = appendDestination(b, h.Dest)
+	}
+	return b, nil
+}
+
+func appendRoute(b []byte, route []core.NodeID) ([]byte, error) {
+	if len(route) > MaxRouteHops {
+		return nil, ErrBadStreamHeader
+	}
+	b = append(b, byte(len(route)))
+	for _, hop := range route {
 		if len(hop) == 0 || len(hop) > core.MaxNodeIDLen {
 			return nil, ErrBadStreamHeader
 		}
 		b = append(b, byte(len(hop)))
 		b = append(b, hop...)
 	}
-	if version == StreamHeaderVersionExit {
-		b = appendDestination(b, h.Dest)
-	}
 	return b, nil
+}
+
+func readRoute(r io.Reader, hops int) ([]core.NodeID, error) {
+	if hops > MaxRouteHops {
+		return nil, ErrBadStreamHeader
+	}
+	var route []core.NodeID
+	for i := 0; i < hops; i++ {
+		var l [1]byte
+		if _, err := io.ReadFull(r, l[:]); err != nil {
+			return nil, err
+		}
+		id := make([]byte, l[0])
+		if _, err := io.ReadFull(r, id); err != nil {
+			return nil, err
+		}
+		nid, err := core.ParseNodeID(string(id))
+		if err != nil {
+			return nil, ErrBadStreamHeader
+		}
+		route = append(route, nid)
+	}
+	return route, nil
 }
 
 func appendDestination(b []byte, d Destination) []byte {
@@ -185,10 +231,21 @@ func readDestination(r io.Reader) (Destination, error) {
 func ReadStreamHeader(r io.Reader) (StreamHeader, error) {
 	var h StreamHeader
 	var fixed [6]byte
-	if _, err := io.ReadFull(r, fixed[:]); err != nil {
+	if _, err := io.ReadFull(r, fixed[:2]); err != nil {
 		return h, err
 	}
 	version := fixed[0]
+	if version == StreamHeaderVersionPath {
+		route, err := readRoute(r, int(fixed[1]))
+		if err != nil {
+			return h, err
+		}
+		h.Path, h.Route = true, route
+		return h, nil
+	}
+	if _, err := io.ReadFull(r, fixed[2:]); err != nil {
+		return h, err
+	}
 	if version != StreamHeaderVersion && version != StreamHeaderVersionExit {
 		return h, ErrBadStreamHeader
 	}
@@ -215,25 +272,11 @@ func ReadStreamHeader(r io.Reader) (StreamHeader, error) {
 		return h, ErrBadStreamHeader // encoders always send these as IPv4
 	}
 	h.Client = netip.AddrPortFrom(addr, binary.BigEndian.Uint16(buf[ipLen:]))
-	hops := int(buf[ipLen+2])
-	if hops > MaxRouteHops {
-		return h, ErrBadStreamHeader
+	route, err := readRoute(r, int(buf[ipLen+2]))
+	if err != nil {
+		return h, err
 	}
-	for i := 0; i < hops; i++ {
-		var l [1]byte
-		if _, err := io.ReadFull(r, l[:]); err != nil {
-			return h, err
-		}
-		id := make([]byte, l[0])
-		if _, err := io.ReadFull(r, id); err != nil {
-			return h, err
-		}
-		nid, err := core.ParseNodeID(string(id))
-		if err != nil {
-			return h, ErrBadStreamHeader
-		}
-		h.Route = append(h.Route, nid)
-	}
+	h.Route = route
 	if version == StreamHeaderVersionExit {
 		d, err := readDestination(r)
 		if err != nil {

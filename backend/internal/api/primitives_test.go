@@ -97,11 +97,13 @@ func TestJoinToken(t *testing.T) {
 	id, _ := crypto.GenerateIdentity()
 	c := &config.Config{
 		Node:  config.Node{ID: "kharej-01"},
-		Local: config.Local{IPv4Pool: []string{"198.51.100.7"}},
+		Local: config.Local{IPv4Pool: []string{"198.51.100.7"}, IPv6Pool: []string{"2001:db8::7"}},
 		TransportListen: []config.TransportListen{
 			{Transport: "tls", Port: 9443, Options: map[string]any{"sni": "cdn.example.com", "cert_file": "/etc/secret.pem"}},
-			{Transport: "tls", Port: 2083},
+			{Transport: "tls", Port: 2083, Options: map[string]any{"sni": "cdn.example.com"}},
 			{Transport: "quic", PortRange: config.PortRange{Lo: 40000, Hi: 40010}},
+			{Transport: "ws", Port: 8080, Options: map[string]any{"path": "/edge", "tls": false, "key_file": "/k"}},
+			{Transport: "grpc", Port: 8443, Options: map[string]any{"service": "a.B"}},
 		},
 	}
 	tok, err := makeJoinToken(c, id.PublicKey(), id.Sign, time.Unix(1, 0))
@@ -113,11 +115,22 @@ func TestJoinToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.ID != "kharej-01" || p.Weight != 7 || p.PublicKey != config.FormatPublicKey(id.PublicKey()) ||
-		len(p.Endpoints) != 1 || len(p.Endpoints[0].Ports) != 2 || p.Endpoints[0].Options["sni"] != "cdn.example.com" {
+		len(p.Endpoints) != 3 || len(p.Endpoints[0].Ports) != 2 || p.Endpoints[0].Options["sni"] != "cdn.example.com" ||
+		len(p.IPv6Pool) != 1 {
 		t.Fatalf("peer %+v", p)
 	}
-	if _, leaked := p.Endpoints[0].Options["cert_file"]; leaked {
-		t.Fatal("certificate path exported in join token")
+	if ws := p.Endpoints[1].Options; ws["path"] != "/edge" || ws["tls"] != false {
+		t.Fatalf("ws options %+v", ws)
+	}
+	if g := p.Endpoints[2].Options; g["service"] != "a.B" {
+		t.Fatalf("grpc options %+v", g)
+	}
+	for _, e := range p.Endpoints {
+		for _, k := range []string{"cert_file", "key_file"} {
+			if _, leaked := e.Options[k]; leaked {
+				t.Fatalf("%s exported in join token", k)
+			}
+		}
 	}
 	// Any edit breaks the signature.
 	body := tok[len(joinTokenPrefix):strings.LastIndex(tok, ".")]
@@ -127,8 +140,14 @@ func TestJoinToken(t *testing.T) {
 			t.Errorf("token %.20q accepted", bad)
 		}
 	}
-	// Without addresses the peer is inbound-only.
+	// IPv6 addresses alone are enough to dial.
 	c.Local.IPv4Pool = nil
+	tok, _ = makeJoinToken(c, id.PublicKey(), id.Sign, time.Unix(1, 0))
+	if p, _ := parseJoinToken(tok, 1); len(p.Endpoints) != 3 {
+		t.Fatalf("IPv6-only token lost its endpoints %+v", p.Endpoints)
+	}
+	// Without addresses the peer is inbound-only.
+	c.Local.IPv6Pool = nil
 	tok, _ = makeJoinToken(c, id.PublicKey(), id.Sign, time.Unix(1, 0))
 	if p, _ := parseJoinToken(tok, 1); len(p.Endpoints) != 0 {
 		t.Fatalf("addressless token has endpoints %+v", p.Endpoints)

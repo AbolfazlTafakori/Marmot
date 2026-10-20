@@ -10,12 +10,14 @@ import (
 	"log/slog"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"marmot/internal/config"
 	"marmot/internal/core"
 	"marmot/internal/crypto"
 	"marmot/internal/forwarder"
+	"marmot/internal/scheduler"
 	"marmot/internal/session"
 	"marmot/internal/socks5"
 	"marmot/internal/steering"
@@ -60,6 +62,7 @@ type Node struct {
 	forwarder *forwarder.Forwarder
 	steering  *steering.Steering
 	socks     *socks5.Server // exit-mode inbound; nil when disabled
+	picker    *scheduler.Picker
 
 	ctx    context.Context // cancelled by Stop; parent of stream serving
 	cancel context.CancelFunc
@@ -69,6 +72,9 @@ type Node struct {
 	// growing across reconnects. Guarded by totalsMu.
 	totalsMu sync.Mutex
 	closed   map[core.NodeID]byteTotals
+
+	transit      atomic.Int64  // relayed paths passing through this node now
+	transitBytes atomic.Uint64 // bytes of ended relayed paths
 }
 
 // byteTotals are bytes sent to and received from a peer.
@@ -84,8 +90,8 @@ func New(cfg *config.Config, identity *crypto.Identity, opts Options) (*Node, er
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Node{identity: identity, version: opts.Version, log: log, events: newEventBus(), cfg: cfg,
-		exitDestinations: opts.exitDestinations,
-		closed:           map[core.NodeID]byteTotals{}}, nil
+		exitDestinations: opts.exitDestinations, picker: scheduler.New(),
+		closed: map[core.NodeID]byteTotals{}}, nil
 }
 
 // PublicKey returns this node's identity key.
@@ -221,6 +227,9 @@ func (n *Node) onInbound(s *session.MuxSession) {
 func (n *Node) serveSession(s *session.MuxSession) {
 	n.mu.RLock()
 	ctx, fwd := n.ctx, n.forwarder
+	for _, l := range n.links {
+		l.kick() // a new session may be the relay another peer waits for
+	}
 	n.mu.RUnlock()
 	n.wg.Add(1)
 	go func() {
@@ -234,6 +243,10 @@ func (n *Node) serveSession(s *session.MuxSession) {
 			n.wg.Add(1)
 			go func() {
 				defer n.wg.Done()
+				if h.Path {
+					n.servePath(ctx, s, st, h)
+					return
+				}
 				fwd.Serve(ctx, st, h)
 			}()
 		}

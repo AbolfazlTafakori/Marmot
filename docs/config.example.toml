@@ -27,6 +27,10 @@ protocols = ["tcp", "udp"]            # default for every port
 transport = "tls"
 port = 9443
 [[transport_listen]]
+transport = "ws"
+port = 2083
+options = { path = "/ws" }            # tls, cert_file, key_file, sni as for tls
+[[transport_listen]]
 transport = "quic"
 port_range = "40000-50000"
 
@@ -88,7 +92,9 @@ ipv6_subnet = "2001:db8:2::/64"         # Phase 4: rotating addresses
   transport = "ws"
   ports = [443]
   # direction = "inbound"             # Phase 4: peer dials us (reverse)
-  options = { path = "/ws" }
+  # ws options: path (default "/"), host (Host header), tls (default true),
+  # sni, fingerprint. tls = false suits a CDN that terminates TLS for us.
+  options = { path = "/ws", sni = "cdn.example.com" }
 
   [[peers.endpoints]]
   transport = "quic"
@@ -105,6 +111,9 @@ ipv4_pool = ["203.0.113.5"]
   [[peers.endpoints]]
   transport = "grpc"
   ports = [443]
+  # grpc options: service (default "marmot.Tunnel"; calls /<service>/Tun),
+  # host (:authority), tls (default true), sni, fingerprint.
+  options = { service = "api.v1.Sync", sni = "cdn.example.com" }
   # direction = "outbound"            # Phase 4
 
 # ---------------------------------------------------------------

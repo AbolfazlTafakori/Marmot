@@ -112,7 +112,7 @@ The first bytes written to every new mux stream:
 
 | Field | Size | Notes |
 |---|---|---|
-| version | 1 | `0x01` |
+| version | 1 | `0x01` (`0x02` exit stream, §6.2; `0x03` path stream, §6.3) |
 | proto | 1 | `1` TCP, `2` UDP |
 | class | 1 | `1` tunneled, `2` vip |
 | target_port | 2 | port on the receiving node (after `port_map`) |
@@ -140,9 +140,24 @@ A stream opened by the exit-mode SOCKS5 inbound names its destination ([ADR-0010
 
 ---
 
+### 6.3 Path streams (version 3)
+A path stream carries a session path through relay nodes ([ADR-0012](../adr/0012-relay-path-streams.md)). Its header is only:
+
+| Field | Size | Notes |
+|---|---|---|
+| version | 1 | `0x03` |
+| route_len | 1 | hops after the receiving node, at most 4 |
+| route | n×(1+len) | `len:u8 | node_id` per hop |
+
+The receiver answers with the reply byte of §6. With `route_len = 0` it answers `0` and treats the rest of the stream as a connection accepted by an inter-node listener: a Noise handshake (§2) follows. Otherwise see §7.
+
+---
+
 ## 7. Relay
 
-A relay node that receives a stream header with `route_len > 0` pops the first hop, opens a stream to that node with the rest of the route, writes the shortened header, and pipes bytes. The end-to-end user payload stays inside the two endpoint sessions' encryption; the relay only sees the header.
+User streams (versions 1 and 2) always run end to end; a user stream with `route_len > 0` is answered `3` (policy denied).
+
+A node that receives a path stream with `route_len > 0` checks its transit policy ([ADR-0012](../adr/0012-relay-path-streams.md) §3), opens a path stream to the first hop of the route over a session whose active path is direct, sending the rest of the route, waits for that hop's reply byte, answers the sender with it, and if it is `0` pipes bytes both ways until either side closes. The relay never sees user bytes: the end-to-end session's Noise handshake and records run inside the path stream.
 
 ---
 

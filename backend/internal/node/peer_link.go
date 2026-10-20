@@ -11,6 +11,7 @@ import (
 	"marmot/internal/config"
 	"marmot/internal/core"
 	"marmot/internal/crypto"
+	"marmot/internal/mesh"
 	"marmot/internal/session"
 	"marmot/internal/transport"
 )
@@ -18,7 +19,7 @@ import (
 const (
 	dialTimeout    = 10 * time.Second
 	maintainEvery  = 2 * time.Second
-	minRedialDelay = time.Second
+	minRedialDelay = 100 * time.Millisecond
 	maxRedialDelay = 30 * time.Second
 )
 
@@ -34,20 +35,24 @@ type linkDeps struct {
 	rotateInterval time.Duration
 	events         *eventBus
 	serve          func(*session.MuxSession) // starts the stream accept loop
+	relayVias      func(target core.NodeID) []core.NodeID
+	dialRelay      func(ctx context.Context, via, target core.NodeID) (transport.Conn, error)
 	log            *slog.Logger
 }
 
 // peerLink keeps one outbound session to a peer alive: it dials, keeps
 // hot-standby paths joined, rotates paths make-before-break, and redials
-// with backoff when the session ends. In Phase 2 the mesh path manager
-// takes this role.
+// when the session ends. Which route to try comes from the peer's
+// mesh.Planner: diverse routes first, failed ones in quarantine, relayed
+// routes only while no direct path is up (ADR-0011, ADR-0012).
 type peerLink struct {
-	deps  linkDeps
-	cfg   config.Peer
-	id    core.NodeID
-	key   ed25519.PublicKey
-	cands []candidate
-	next  int // round-robin cursor; owned by run
+	deps linkDeps
+	cfg  config.Peer
+	id   core.NodeID
+	key  ed25519.PublicKey
+	plan *mesh.Planner // owned by run
+
+	relayTurn bool // whether a relayed route goes first next time; owned by run
 
 	mu   sync.Mutex
 	sess *session.MuxSession
@@ -57,10 +62,10 @@ type peerLink struct {
 	done   chan struct{}
 }
 
-func startLink(deps linkDeps, p config.Peer, key ed25519.PublicKey, cands []candidate) *peerLink {
+func startLink(deps linkDeps, p config.Peer, key ed25519.PublicKey, cands []mesh.Candidate) *peerLink {
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &peerLink{
-		deps: deps, cfg: p, id: core.NodeID(p.ID), key: key, cands: cands,
+		deps: deps, cfg: p, id: core.NodeID(p.ID), key: key, plan: mesh.NewPlanner(cands, nil),
 		wake: make(chan struct{}, 1), cancel: cancel, done: make(chan struct{}),
 	}
 	l.deps.log = deps.log.With("peer", p.ID)
@@ -87,6 +92,7 @@ func (l *peerLink) setSession(s *session.MuxSession) {
 	l.mu.Unlock()
 }
 
+// kick makes the link look at its paths now, e.g. because a relay came up.
 func (l *peerLink) kick() {
 	select {
 	case l.wake <- struct{}{}:
@@ -96,22 +102,19 @@ func (l *peerLink) kick() {
 
 func (l *peerLink) run(ctx context.Context) {
 	defer close(l.done)
-	if len(l.cands) == 0 {
+	if !l.plan.HasDirect() {
 		return // inbound-only peer: it dials us
 	}
-	delay := minRedialDelay
 	for ctx.Err() == nil {
-		s := l.establish(ctx)
+		s, wait := l.establish(ctx)
 		if s == nil {
-			if !sleepCtx(ctx, delay) {
+			if !l.sleep(ctx, min(max(wait, minRedialDelay), maxRedialDelay)) {
 				return
 			}
-			delay = min(2*delay, maxRedialDelay)
 			continue
 		}
-		delay = minRedialDelay
 		l.setSession(s)
-		l.deps.log.Info("session up")
+		l.deps.log.Info("session up", "via", activeMeta(s))
 		l.deps.events.publish(EventPeerState, map[string]any{"peer": l.id, "state": "up"})
 		l.deps.serve(s)
 		l.maintain(ctx, s)
@@ -122,14 +125,68 @@ func (l *peerLink) run(ctx context.Context) {
 	}
 }
 
-// establish tries each candidate once, round robin, and returns the first
-// session that comes up.
-func (l *peerLink) establish(ctx context.Context) *session.MuxSession {
-	for range l.cands {
-		c := l.pick(nil)
+// sleep waits for d, a kick or the end of the link.
+func (l *peerLink) sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-l.wake:
+	case <-t.C:
+	}
+	return true
+}
+
+// next asks the planner for a route. While a direct path is up, only
+// direct routes are tried. Otherwise direct and relayed routes take turns:
+// a blackholed direct route costs a full dial timeout per try, and waiting
+// for every direct route to fail first could keep a working relay unused
+// for minutes. When there is nothing to try, wait is how long until a
+// quarantined route frees up (zero = unknown).
+func (l *peerLink) next(inUse []mesh.Route) (mesh.Candidate, time.Duration, bool) {
+	if hasDirect(inUse) {
+		return l.plan.Next(inUse, mesh.Direct)
+	}
+	l.plan.SetRelays(l.deps.relayVias(l.id))
+	order := [2]mesh.Kinds{mesh.Direct, mesh.Relayed}
+	if l.relayTurn {
+		order[0], order[1] = order[1], order[0]
+	}
+	l.relayTurn = !l.relayTurn
+	var wait time.Duration
+	for _, k := range order {
+		c, w, ok := l.plan.Next(inUse, k)
+		if ok {
+			return c, 0, true
+		}
+		if w > 0 && (wait == 0 || w < wait) {
+			wait = w
+		}
+	}
+	return mesh.Candidate{}, wait, false
+}
+
+func hasDirect(inUse []mesh.Route) bool {
+	for _, r := range inUse {
+		if r.Via == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// establish tries routes until a session comes up or every route is in
+// quarantine.
+func (l *peerLink) establish(ctx context.Context) (*session.MuxSession, time.Duration) {
+	for ctx.Err() == nil {
+		c, wait, ok := l.next(nil)
+		if !ok {
+			return nil, wait
+		}
 		conn, meta, err := l.dial(ctx, c)
 		if err != nil {
-			l.deps.log.Debug("dial failed", "via", c.key(), "err", err)
+			l.fail(c, "dial failed", err)
 			continue
 		}
 		cc := l.deps.conn
@@ -142,26 +199,37 @@ func (l *peerLink) establish(ctx context.Context) *session.MuxSession {
 		}, conn, meta)
 		cancel()
 		if err != nil {
-			l.deps.log.Warn("handshake failed", "via", meta, "err", err)
+			l.fail(c, "handshake failed", err)
 			continue
 		}
-		return s
+		l.plan.Succeeded(c)
+		return s, 0
 	}
-	return nil
+	return nil, 0
 }
 
-func (l *peerLink) dial(ctx context.Context, c candidate) (transport.Conn, session.PathMeta, error) {
-	tr, err := transport.Get(c.transport)
-	if err != nil {
-		return nil, session.PathMeta{}, err
-	}
+func (l *peerLink) fail(c mesh.Candidate, what string, err error) {
+	d := l.plan.Failed(c)
+	l.deps.log.Debug(what, "via", c.Key(), "err", err, "quarantine", d)
+}
+
+func (l *peerLink) dial(ctx context.Context, c mesh.Candidate) (transport.Conn, session.PathMeta, error) {
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
-	conn, err := tr.Dial(dctx, transport.Endpoint{Addr: c.remote, Options: c.options}, c.local)
+	if c.Relayed() {
+		conn, err := l.deps.dialRelay(dctx, c.Via, l.id)
+		if err != nil {
+			return nil, session.PathMeta{}, err
+		}
+		meta := session.PathMeta{Transport: mesh.TransportRelay,
+			Local: conn.LocalAddr().String(), Remote: conn.RemoteAddr().String()}
+		return conn, meta, nil
+	}
+	conn, err := mesh.Dial(dctx, c)
 	if err != nil {
 		return nil, session.PathMeta{}, err
 	}
-	meta := session.PathMeta{Transport: c.transport, Local: conn.LocalAddr().String(), Remote: c.remote.String()}
+	meta := session.PathMeta{Transport: c.Transport, Local: conn.LocalAddr().String(), Remote: c.Remote.String()}
 	return conn, meta, nil
 }
 
@@ -177,13 +245,17 @@ func (l *peerLink) onPathDown(info session.PathInfo, cause error) {
 	l.kick()
 }
 
-// maintain keeps standbys filled and rotates paths until the session ends
-// or the link stops.
+// maintain keeps standbys filled, moves the session off a relay once a
+// direct route works again, and rotates paths, until the session ends or
+// the link stops.
 func (l *peerLink) maintain(ctx context.Context, s *session.MuxSession) {
 	t := time.NewTicker(maintainEvery)
 	defer t.Stop()
 	lastRotate, baseBytes := time.Now(), sessionBytes(s)
 	for {
+		if l.leaveRelay(ctx, s) {
+			lastRotate, baseBytes = time.Now(), sessionBytes(s)
+		}
 		l.fillStandby(ctx, s)
 		if time.Since(lastRotate) >= l.deps.rotateInterval || sessionBytes(s)-baseBytes >= l.deps.rotateBytes {
 			l.rotate(ctx, s)
@@ -206,73 +278,103 @@ func sessionBytes(s *session.MuxSession) uint64 {
 }
 
 // fillStandby joins paths until the session has 1 + standby of them,
-// preferring routes not already in use.
+// each as different as possible from those already up.
 func (l *peerLink) fillStandby(ctx context.Context, s *session.MuxSession) {
-	for tries := 0; tries < len(l.cands); tries++ {
+	for ctx.Err() == nil {
 		st := s.Stats()
-		if len(st.Paths) >= 1+l.deps.standby || ctx.Err() != nil {
+		if len(st.Paths) >= 1+l.deps.standby {
 			return
 		}
-		if err := l.join(ctx, s, inUse(st), false); err != nil {
-			l.deps.log.Debug("standby join failed", "err", err)
+		c, _, ok := l.next(routes(st))
+		if !ok {
+			return
+		}
+		if err := l.join(ctx, s, c, false); err != nil {
+			l.fail(c, "standby join failed", err)
 		}
 	}
+}
+
+// leaveRelay moves a session whose active path is relayed onto a direct
+// route, make-before-break, if one is free. It reports whether it did.
+func (l *peerLink) leaveRelay(ctx context.Context, s *session.MuxSession) bool {
+	st := s.Stats()
+	active, ok := activePath(st)
+	if !ok || !isRelayed(active.Meta) {
+		return false
+	}
+	c, _, ok := l.plan.Next(routes(st), mesh.Direct)
+	if !ok {
+		return false
+	}
+	if err := l.join(ctx, s, c, true); err != nil {
+		l.fail(c, "direct route still failing", err)
+		return false
+	}
+	l.deps.log.Info("session back on a direct path", "via", c.Key())
+	l.deps.events.publish(EventRotation, map[string]any{"peer": l.id, "reason": "direct"})
+	return true
 }
 
 // rotate replaces the active path with a fresh one (new keys, ideally a
 // different route) before closing the old one.
 func (l *peerLink) rotate(ctx context.Context, s *session.MuxSession) {
-	if err := l.join(ctx, s, inUse(s.Stats()), true); err != nil {
-		l.deps.log.Warn("rotation failed", "err", err)
+	// The active path is being replaced, so only the standbys count as in
+	// use; with a single route the rotation reuses it with fresh keys.
+	st := s.Stats()
+	var standbys []mesh.Route
+	for i := range st.Paths {
+		if !st.Paths[i].Active {
+			standbys = append(standbys, routeOf(st.Paths[i].Meta))
+		}
+	}
+	c, _, ok := l.next(standbys)
+	if !ok {
 		return
 	}
-	l.deps.log.Debug("path rotated")
+	if err := l.join(ctx, s, c, true); err != nil {
+		l.fail(c, "rotation failed", err)
+		return
+	}
+	l.deps.log.Debug("path rotated", "via", c.Key())
 	l.deps.events.publish(EventRotation, map[string]any{"peer": l.id})
 }
 
-func (l *peerLink) join(ctx context.Context, s *session.MuxSession, used map[string]bool, rotate bool) error {
-	c := l.pick(used)
+func (l *peerLink) join(ctx context.Context, s *session.MuxSession, c mesh.Candidate, rotate bool) error {
 	conn, meta, err := l.dial(ctx, c)
 	if err != nil {
 		return err
 	}
 	jctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
-	return s.Join(jctx, conn, meta, rotate)
+	if err := s.Join(jctx, conn, meta, rotate); err != nil {
+		return err
+	}
+	l.plan.Succeeded(c)
+	return nil
 }
 
-// pick returns the next candidate whose route is not in used, or simply
-// the next one when every route is in use.
-func (l *peerLink) pick(used map[string]bool) candidate {
-	for i := 0; i < len(l.cands); i++ {
-		c := l.cands[(l.next+i)%len(l.cands)]
-		if !used[routeKey(c.transport, c.remote.String())] {
-			l.next += i + 1
-			return c
+// routes lists the routes of a session's live paths.
+func routes(st session.ConnStats) []mesh.Route {
+	out := make([]mesh.Route, 0, len(st.Paths))
+	for i := range st.Paths {
+		out = append(out, routeOf(st.Paths[i].Meta))
+	}
+	return out
+}
+
+func activePath(st session.ConnStats) (session.PathInfo, bool) {
+	for i := range st.Paths {
+		if st.Paths[i].Active {
+			return st.Paths[i], true
 		}
 	}
-	c := l.cands[l.next%len(l.cands)]
-	l.next++
-	return c
+	return session.PathInfo{}, false
 }
 
-func inUse(st session.ConnStats) map[string]bool {
-	m := make(map[string]bool, len(st.Paths))
-	for i := range st.Paths {
-		m[routeKey(st.Paths[i].Meta.Transport, st.Paths[i].Meta.Remote)] = true
+func activeMeta(s *session.MuxSession) string {
+	if p, ok := activePath(s.Stats()); ok {
+		return p.Meta.String()
 	}
-	return m
-}
-
-func routeKey(transport, remote string) string { return transport + "|" + remote }
-
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
+	return ""
 }

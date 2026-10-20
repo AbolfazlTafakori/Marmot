@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 
 	"marmot/internal/core"
 	"marmot/internal/crypto"
 	"marmot/internal/frame"
+	"marmot/internal/scheduler"
 	"marmot/internal/session"
 	"marmot/internal/steering"
 )
@@ -16,37 +16,27 @@ import (
 // ErrNoRoute means no allowed peer has a live session.
 var ErrNoRoute = errors.New("node: no live session to any allowed peer")
 
-type routeCandidate struct {
-	s      *session.MuxSession
-	weight int
-}
-
-// Open implements steering.Opener: it picks a live session to one of the
-// rule's peers, weighted by peer weight, and opens the stream there. If
-// opening fails it tries the next one. The weighted choice is the Phase 1
-// stand-in for the scheduler.
+// Open implements steering.Opener: the scheduler orders the rule's peers
+// that have a live session, and the stream opens on the first that takes
+// it.
 func (n *Node) Open(ctx context.Context, rule steering.Rule, h frame.StreamHeader) (session.Stream, error) {
-	cands := n.routeCandidates(rule.Peers, h.Proto)
 	lastErr := ErrNoRoute
-	for len(cands) > 0 {
-		i := weightedPick(cands)
-		c := cands[i]
-		cands = append(cands[:i], cands[i+1:]...)
-		st, err := c.s.OpenStream(ctx, h)
+	for _, s := range n.route(rule.Peers, h.Proto, h.Class) {
+		st, err := s.OpenStream(ctx, h)
 		if err == nil {
 			return st, nil
 		}
-		lastErr = fmt.Errorf("peer %s: %w", c.s.Peer(), err)
+		lastErr = fmt.Errorf("peer %s: %w", s.Peer(), err)
 	}
 	return nil, lastErr
 }
 
-// routeCandidates returns one session per allowed peer: the outbound one
-// when it is up, else the newest inbound one (the peer dialed us).
-func (n *Node) routeCandidates(allowed []core.NodeID, proto core.Proto) []routeCandidate {
+// route returns one session per allowed peer that can carry proto, in the
+// order the scheduler picks for class.
+func (n *Node) route(allowed []core.NodeID, proto core.Proto, class core.Class) []*session.MuxSession {
 	n.mu.RLock()
-	defer n.mu.RUnlock()
 	if !n.running {
+		n.mu.RUnlock()
 		return nil
 	}
 	peers := allowed
@@ -56,52 +46,89 @@ func (n *Node) routeCandidates(allowed []core.NodeID, proto core.Proto) []routeC
 			peers = append(peers, id)
 		}
 	}
-	var inbound map[core.NodeID]*session.MuxSession
-	out := make([]routeCandidate, 0, len(peers))
+	byPeer := map[core.NodeID][]*session.MuxSession{}
 	for _, id := range peers {
-		w, ok := n.weights[id]
+		if _, ok := n.weights[id]; !ok {
+			continue
+		}
+		if l := n.links[id]; l != nil {
+			if s := l.session(); s != nil {
+				byPeer[id] = append(byPeer[id], s)
+			}
+		}
+	}
+	for _, s := range n.acceptor.Sessions() {
+		if ss, ok := byPeer[s.Peer()]; ok || n.allowed(peers, s.Peer()) {
+			byPeer[s.Peer()] = append(ss, s)
+		}
+	}
+	weights := n.weights
+	pick := n.picker
+	n.mu.RUnlock()
+
+	sessions := make([]*session.MuxSession, 0, len(byPeer))
+	cands := make([]scheduler.Candidate, 0, len(byPeer))
+	for id, ss := range byPeer {
+		s, c, ok := bestSession(ss, proto)
 		if !ok {
 			continue
 		}
-		var s *session.MuxSession
-		if l := n.links[id]; l != nil {
-			s = l.session()
-		}
-		if s == nil {
-			if inbound == nil {
-				inbound = newestInbound(n.acceptor.Sessions())
-			}
-			s = inbound[id]
-		}
-		if s == nil || (proto == core.ProtoUDP && s.Caps()&crypto.CapUDP == 0) {
-			continue
-		}
-		out = append(out, routeCandidate{s: s, weight: w})
+		c.Peer, c.Weight = id, weights[id]
+		sessions = append(sessions, s)
+		cands = append(cands, c)
+	}
+	out := make([]*session.MuxSession, 0, len(sessions))
+	for _, i := range pick.Order(class, cands) {
+		out = append(out, sessions[i])
 	}
 	return out
 }
 
-func newestInbound(all []*session.MuxSession) map[core.NodeID]*session.MuxSession {
-	m := make(map[core.NodeID]*session.MuxSession, len(all))
-	for _, s := range all {
-		if cur := m[s.Peer()]; cur == nil || s.Started().After(cur.Started()) {
-			m[s.Peer()] = s
+func (n *Node) allowed(peers []core.NodeID, id core.NodeID) bool {
+	if _, ok := n.weights[id]; !ok {
+		return false
+	}
+	for _, p := range peers {
+		if p == id {
+			return true
 		}
 	}
-	return m
+	return false
 }
 
-func weightedPick(cands []routeCandidate) int {
-	total := 0
-	for _, c := range cands {
-		total += c.weight
-	}
-	r := rand.IntN(total) //nolint:gosec // load spreading, not a secret
-	for i, c := range cands {
-		if r < c.weight {
-			return i
+// bestSession picks the session to a peer that should carry a stream: a
+// ready one on a direct path, else a ready relayed one, else any live one
+// (it may recover within resume_timeout); the outbound session, listed
+// first, wins ties, then the newest inbound.
+func bestSession(ss []*session.MuxSession, proto core.Proto) (*session.MuxSession, scheduler.Candidate, bool) {
+	var (
+		best     *session.MuxSession
+		bestCand scheduler.Candidate
+		bestRank = -1
+	)
+	for _, s := range ss {
+		if !live(s) || (proto == core.ProtoUDP && s.Caps()&crypto.CapUDP == 0) {
+			continue
 		}
-		r -= c.weight
+		st := s.Stats()
+		c := scheduler.Candidate{Streams: s.NumStreams()}
+		rank := 0
+		if p, ok := activePath(st); ok && st.Ready {
+			c.RTT, c.Relayed = p.RTT, isRelayed(p.Meta)
+			rank = 1
+			if !c.Relayed {
+				rank = 2
+			}
+		}
+		if rank > bestRank || (rank == bestRank && best.Role() != session.Initiator && s.Started().After(best.Started())) {
+			best, bestCand, bestRank = s, c, rank
+		}
 	}
-	return len(cands) - 1
+	if best == nil {
+		return nil, scheduler.Candidate{}, false
+	}
+	if bestRank == 0 {
+		bestCand.Relayed = true // not ready: try it after every ready session
+	}
+	return best, bestCand, true
 }

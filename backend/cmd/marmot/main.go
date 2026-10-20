@@ -10,8 +10,10 @@ import (
 	"marmot/internal/config"
 	"marmot/internal/crypto"
 
+	_ "marmot/internal/transport/grpc"
 	_ "marmot/internal/transport/tcp"
 	_ "marmot/internal/transport/tls"
+	_ "marmot/internal/transport/ws"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".

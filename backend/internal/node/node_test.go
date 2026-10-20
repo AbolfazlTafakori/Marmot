@@ -15,8 +15,10 @@ import (
 	"marmot/internal/crypto"
 	"marmot/internal/proxyproto"
 
+	_ "marmot/internal/transport/grpc"
 	_ "marmot/internal/transport/tcp"
 	_ "marmot/internal/transport/tls"
+	_ "marmot/internal/transport/ws"
 )
 
 // The relay-mode scenario of ARCHITECTURE §3.1 inside one process:
