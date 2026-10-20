@@ -5,6 +5,8 @@ export interface Format {
   bytes: (n: number) => string;
   bits: (bps: number) => string;
   ms: (ms: number) => string;
+  /** A percentage given in percent units: pct(2.5) is 2.5 %. */
+  pct: (percent: number) => string;
   duration: (sec: number) => string;
   dateTime: (iso: string) => string;
   time: (iso: string) => string;
@@ -21,6 +23,7 @@ export function makeFormat(locale: 'fa' | 'en', m: Messages): Format {
   const dtFmt = new Intl.DateTimeFormat(tag, { dateStyle: 'medium', timeStyle: 'short' });
   const tFmt = new Intl.DateTimeFormat(tag, { hour: '2-digit', minute: '2-digit' });
   const num = (n: number, maxFraction = 0) => numFmt(maxFraction).format(n);
+  const pctFmt = new Intl.NumberFormat(tag, { style: 'percent', maximumFractionDigits: 1 });
 
   const scaled = (n: number, units: readonly string[], base: number) => {
     let i = 0;
@@ -37,6 +40,7 @@ export function makeFormat(locale: 'fa' | 'en', m: Messages): Format {
     bytes: (n) => scaled(n, m.units.bytes, 1024),
     bits: (bps) => scaled(bps, m.units.bitRate, 1000),
     ms: (v) => `${num(v, v < 10 ? 1 : 0)} ${m.units.ms}`,
+    pct: (p) => pctFmt.format(p / 100),
     duration: (sec) => {
       const d = Math.floor(sec / 86400);
       const h = Math.floor((sec % 86400) / 3600);

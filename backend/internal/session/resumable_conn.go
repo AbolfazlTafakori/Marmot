@@ -30,10 +30,17 @@ type ConnConfig struct {
 	// DeadAfter is how long a path may stay silent before it is dropped.
 	DeadAfter     time.Duration
 	ResumeTimeout time.Duration
-	Logger        *slog.Logger
+	// FECData and FECParity are the initial FEC group of a v2 session's
+	// datagram paths; parity 0 means none until the controller says.
+	FECData, FECParity int
+	Logger             *slog.Logger
 	// OnPathDown is called after a path is removed. It runs on a session
 	// goroutine and must not block.
 	OnPathDown func(PathInfo, error)
+	// OnPathSuspect is called when a v2 path stops being acknowledged and
+	// takes no new data (ADR-0013 §5), on a goroutine of its own. Active
+	// in the PathInfo means the path was the leading one: a failover.
+	OnPathSuspect func(PathInfo)
 }
 
 func (cfg ConnConfig) validate() error {
@@ -218,9 +225,15 @@ func (c *ResumableConn) shutdown(err error, code uint16, notifyPeer bool) {
 		p.markGone()
 		paths = append(paths, p)
 	}
-	active, ready := c.active, c.ready
+	active := c.active
+	notify := notifyPeer && active != nil && c.ready
 	c.paths, c.active, c.retiring = map[uint64]*path{}, nil, nil
 	c.cond.Broadcast()
+	if notify {
+		// Counted before done closes, while the conn's goroutines keep the
+		// count above zero: a concurrent Close cannot be in Wait at zero.
+		c.wg.Add(1)
+	}
 	c.mu.Unlock()
 	close(c.done)
 
@@ -229,12 +242,11 @@ func (c *ResumableConn) shutdown(err error, code uint16, notifyPeer bool) {
 			_ = p.conn.Close()
 		}
 	}
-	if !notifyPeer || active == nil || !ready {
+	if !notify {
 		closeAll()
 		return
 	}
 	// The CLOSE write can block on a stuck path; the timer bounds it.
-	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
 		t := time.AfterFunc(closeGrace, closeAll)
@@ -293,6 +305,9 @@ type ConnStats struct {
 	SentOff  uint64 // bytes handed to the peer so far (resent bytes count once)
 	AckedOff uint64
 	RecvOff  uint64
+	// FECData and FECParity are the FEC group of a v2 session's datagram
+	// paths; parity 0 means FEC is off.
+	FECData, FECParity int
 }
 
 // Stats returns a snapshot for status reporting.

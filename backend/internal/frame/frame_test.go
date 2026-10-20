@@ -173,3 +173,37 @@ func BenchmarkWriteReadRecord(b *testing.B) {
 		}
 	}
 }
+
+// TestAppendRecordBatch checks that records built with AppendRecord and
+// sent in one WriteRaw read back like separately written ones, and that
+// they can be mixed with WriteRecord from the same writer.
+func TestAppendRecordBatch(t *testing.T) {
+	a, b := pipePair(t)
+	defer a.Close()
+	defer b.Close()
+	go func() {
+		var batch []byte
+		var err error
+		for i := range 3 {
+			if batch, err = a.AppendRecord(batch, TypePacket, []byte{byte(i)}, i); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		if _, err := a.AppendRecord(batch, TypePacket, make([]byte, MaxBody+1), 0); !errors.Is(err, ErrTooLarge) {
+			t.Errorf("oversized record: %v", err)
+		}
+		if err := a.WriteRaw(batch); err != nil {
+			t.Error(err)
+		}
+		if err := a.WriteRecord(TypePacket, []byte{3}, 0); err != nil {
+			t.Error(err)
+		}
+	}()
+	for i := range 4 {
+		typ, body, err := b.ReadRecord()
+		if err != nil || typ != TypePacket || !bytes.Equal(body, []byte{byte(i)}) {
+			t.Fatalf("record %d: %v %x %v", i, typ, body, err)
+		}
+	}
+}

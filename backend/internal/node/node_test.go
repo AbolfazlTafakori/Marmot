@@ -16,6 +16,7 @@ import (
 	"marmot/internal/proxyproto"
 
 	_ "marmot/internal/transport/grpc"
+	_ "marmot/internal/transport/quic"
 	_ "marmot/internal/transport/tcp"
 	_ "marmot/internal/transport/tls"
 	_ "marmot/internal/transport/ws"
@@ -28,6 +29,7 @@ type relayFixture struct {
 	t                    *testing.T
 	iranID, kharejID     *crypto.Identity
 	userPort, interPort  uint16
+	quicPort             uint16
 	panelPort            uint16
 	panelHeaders         chan proxyproto.Header
 	iran, kharej         *Node
@@ -42,6 +44,16 @@ func freePort(t *testing.T) uint16 {
 	}
 	defer l.Close()
 	return uint16(l.Addr().(*net.TCPAddr).Port)
+}
+
+func freeUDPPort(t *testing.T) uint16 {
+	t.Helper()
+	c, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	return uint16(c.LocalAddr().(*net.UDPAddr).Port)
 }
 
 func parse(t *testing.T, s string) *config.Config {
@@ -62,7 +74,7 @@ func newRelayFixture(t *testing.T) *relayFixture {
 	if f.kharejID, err = crypto.GenerateIdentity(); err != nil {
 		t.Fatal(err)
 	}
-	f.userPort, f.interPort = freePort(t), freePort(t)
+	f.userPort, f.interPort, f.quicPort = freePort(t), freePort(t), freeUDPPort(t)
 	f.startPanel()
 
 	f.iranTOML = fmt.Sprintf(`
@@ -87,10 +99,10 @@ ipv4_pool = ["127.0.0.1"]
   options = { sni = "cdn.example.com", fingerprint = "chrome" }
   [[peers.endpoints]]
   transport = "quic"
-  port_range = "40000-40010"
+  ports = [%d]
 [api]
 listen = "127.0.0.1:%d"
-`, f.userPort, f.userPort, f.panelPort, config.FormatPublicKey(f.kharejID.PublicKey()), f.interPort, freePort(t))
+`, f.userPort, f.userPort, f.panelPort, config.FormatPublicKey(f.kharejID.PublicKey()), f.interPort, f.quicPort, freePort(t))
 
 	f.kharejTOML = fmt.Sprintf(`
 [node]
@@ -101,12 +113,15 @@ preserve_client_ip = "proxy_v2"
 [[transport_listen]]
 transport = "tls"
 port = %d
+[[transport_listen]]
+transport = "quic"
+port = %d
 [[peers]]
 id = "iran-01"
 public_key = %q
 [api]
 listen = "127.0.0.1:%d"
-`, f.interPort, config.FormatPublicKey(f.iranID.PublicKey()), freePort(t))
+`, f.interPort, f.quicPort, config.FormatPublicKey(f.iranID.PublicKey()), freePort(t))
 
 	f.kharej = f.start(f.kharejTOML, f.kharejID)
 	f.iran = f.start(f.iranTOML, f.iranID)

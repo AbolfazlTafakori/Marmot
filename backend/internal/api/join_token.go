@@ -28,17 +28,18 @@ type joinPayload struct {
 }
 
 type joinEndpoint struct {
-	Transport string         `json:"transport"`
-	Ports     []uint16       `json:"ports"`
-	Options   map[string]any `json:"options,omitempty"`
+	Transport string           `json:"transport"`
+	Ports     []uint16         `json:"ports"`
+	PortRange config.PortRange `json:"portRange,omitzero"` // a quic listener on a range
+	Options   map[string]any   `json:"options,omitempty"`
 }
 
 var errBadToken = errors.New("join token is malformed or its signature does not match")
 
 // exportedOptions are the listener options a dialer needs to match: the
-// TLS server name, the WebSocket path, the gRPC service and whether TLS is
-// on. Certificate paths stay private.
-var exportedOptions = []string{"sni", "path", "service", "tls"}
+// TLS server name, the WebSocket path, the gRPC service, whether TLS is on
+// and the QUIC ALPN. Certificate paths stay private.
+var exportedOptions = []string{"sni", "path", "service", "tls", "alpn"}
 
 // makeJoinToken describes this node from its configuration.
 func makeJoinToken(c *config.Config, pub ed25519.PublicKey, sign func([]byte) []byte, now time.Time) (string, error) {
@@ -48,9 +49,6 @@ func makeJoinToken(c *config.Config, pub ed25519.PublicKey, sign func([]byte) []
 	// endpoint with several ports.
 	byKey := map[string]int{}
 	for _, tl := range c.TransportListen {
-		if tl.Port == 0 {
-			continue
-		}
 		var opts map[string]any
 		for _, k := range exportedOptions {
 			if v, ok := tl.Options[k]; ok && v != "" {
@@ -59,6 +57,10 @@ func makeJoinToken(c *config.Config, pub ed25519.PublicKey, sign func([]byte) []
 				}
 				opts[k] = v
 			}
+		}
+		if tl.Port == 0 { // a range is its own endpoint
+			p.Endpoints = append(p.Endpoints, joinEndpoint{Transport: tl.Transport, PortRange: tl.PortRange, Options: opts})
+			continue
 		}
 		key, _ := json.Marshal([]any{tl.Transport, opts}) // map keys marshal sorted
 		i, ok := byKey[string(key)]
@@ -109,7 +111,8 @@ func parseJoinToken(token string, weight int) (config.Peer, error) {
 	// inbound-only and dials us.
 	if len(p.IPv4Pool) > 0 || len(p.IPv6Pool) > 0 || p.IPv6Subnet != "" {
 		for _, e := range p.Endpoints {
-			peer.Endpoints = append(peer.Endpoints, config.Endpoint{Transport: e.Transport, Ports: e.Ports, Options: e.Options})
+			peer.Endpoints = append(peer.Endpoints, config.Endpoint{Transport: e.Transport, Ports: e.Ports,
+				PortRange: e.PortRange, Options: e.Options})
 		}
 	}
 	return peer, nil

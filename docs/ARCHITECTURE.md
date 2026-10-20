@@ -1,6 +1,6 @@
 # Marmot — System Architecture
 
-Status: **v0.3** — Phase 1 implemented (see §18). Changes made while implementing it are recorded in [ADR-0009](adr/0009-panel-api-phase-1.md).
+Status: **v0.5** — Phases 1–3 implemented (see §18). Changes made while implementing them are recorded in ADRs 0009–0015 ([`docs/adr/`](adr/)).
 Audience: the agents and engineers implementing Marmot. Decisions with lasting impact are recorded as ADRs in [`docs/adr/`](adr/).
 
 ---
@@ -175,10 +175,10 @@ Local and remote address pools are first-class. For an IPv6 `/64`, the path mana
 
 ## 8. L2 — FEC
 
-- Reed-Solomon (`klauspost/reedsolomon`, SIMD) over **datagram paths only**. On stream transports (TCP-based) FEC is pointless and disabled.
-- Packets are grouped into blocks of `k` data + `m` parity shards; shards of one block are **spread across different paths**, so losing an entire path can be recovered.
-- `k`/`m` are **adaptive**: the controller sets `m` from measured loss (e.g. `m = 0` under 0.5 % loss), so bandwidth is not wasted on clean networks.
-- Receiver reconstructs as soon as any `k` shards arrive; a block that cannot be reconstructed within its deadline falls back to retransmission by the session layer.
+- Reed-Solomon (`klauspost/reedsolomon`, SIMD) over **datagram paths only** ([ADR-0014](adr/0014-quic-datagram-paths-fec.md)): QUIC paths whose records travel in RFC 9221 datagrams. On stream transports (TCP-based) FEC is pointless and disabled.
+- Packets are grouped into blocks of `k` data + `m` parity shards; parity shards of one block are **spread across the session's datagram paths**, so losing an entire path can be recovered. A block is closed after `k` packets or 10 ms, whichever is first.
+- `k`/`m` are **adaptive**: the controller sets `m` from measured loss (0 under 0.5 % loss, then one more parity per threshold of 0.5 %, 2 %, 5 %, 10 %), so bandwidth is not wasted on clean networks.
+- Receiver reconstructs as soon as any `k` shards arrive and treats a rebuilt packet as received on its own path; a block that cannot be reconstructed within 1 s falls back to retransmission by the session layer.
 
 ---
 
@@ -186,7 +186,7 @@ Local and remote address pools are first-class. For an IPv6 `/64`, the path mana
 
 ### 9.1 Session protocol evolution (see [ADR-0003](adr/0003-session-layer-evolution.md))
 - **v1 (Phase 1–2):** a stream multiplexer (`smux`) over a **resumable conn** ([spec §5](spec/frame.md)) that runs on the **best** path, with **hot-standby** paths already handshaken. Failover = activate a standby path and resend from the last acknowledged byte offset; no stream is reset. Make-before-break rotation reconnects a new path before closing the old one.
-- **v2 (Phase 3):** a true multipath datagram session: per-session sequence numbers, selective ACK, reordering buffer, retransmission on a *different* path, FEC from §8, per-path congestion control. The `Session` interface stays the same, so L5 does not change.
+- **v2 (Phase 3, [ADR-0013](adr/0013-session-v2-multipath.md)):** a multipath packet session with its own stream layer: every healthy path carries packets, each path has its own packet numbers and selective ACK, streams are reassembled by offset, frames of a lost packet are resent on a *different* path, FEC from §8 on datagram paths, and a per-path congestion window. A blackholed path costs about one probe timeout. The `Session` interface stays the same, so L5 does not change; v2 is negotiated with capability bit 3 and v1 remains for peers that do not offer it.
 
 ```go
 // package session
@@ -201,7 +201,7 @@ type Session interface {
 | Class | Policy |
 |---|---|
 | `tunneled` | Weighted by path score; bulk flows prefer high-throughput paths. |
-| `vip` | **Duplicated** over the two best paths on different address families/IPs; receiver de-duplicates by sequence. Small traffic, so the cost is negligible. |
+| `vip` | **Duplicated** over the two best paths on different address families/IPs; receiver de-duplicates by stream offset (session v2). Small traffic, so the cost is negligible. |
 
 ### 9.3 Make-before-break rotation
 A session is rotated (new path + fresh keys) after `rotate_bytes` or `rotate_interval`, whichever first. The new path is fully established and verified before streams migrate; the old one drains and closes. Users see no interruption.
@@ -222,6 +222,8 @@ A session is rotated (new path + fresh keys) after `rotate_bytes` or `rotate_int
 ## 11. Adaptive Controller
 
 A separate component that **observes** and **decides**; it never touches sockets.
+
+Implemented in package `controller` ([ADR-0015](adr/0015-adaptive-controller.md)); the node runs it once a second.
 
 - Inputs: per-path metrics (§7.2), per-transport success/failure history, FEC recovery rate.
 - Path **score** = f(RTT, jitter, loss, throughput, recent failures), with hysteresis to avoid flapping.
@@ -278,9 +280,9 @@ Marmot/
 │   │   ├── session/           # Session/Stream interfaces, v1 mux, v2 later
 │   │   ├── frame/             # wire format codec
 │   │   ├── scheduler/         # which session carries a stream; VIP duplication (v2)
-│   │   ├── fec/               # Reed-Solomon blocks
+│   │   ├── fec/               # Reed-Solomon blocks (ADR-0014)
 │   │   ├── mesh/              # candidates, diversity, quarantine (ADR-0011)
-│   │   ├── controller/        # adaptive controller (pure logic)
+│   │   ├── controller/        # adaptive controller (pure logic, ADR-0015)
 │   │   ├── crypto/            # identity, noise handshake, rotation
 │   │   ├── transport/         # interface + registry
 │   │   │   ├── tcp/ tls/ ws/ grpc/ quic/  (httpx/: shared by ws and grpc)
@@ -360,6 +362,15 @@ Each phase ends with the chaos suite green before the next begins (`backend/test
 - VIP duplication needs session v2; in v1 the scheduler only puts VIP streams on the lowest-RTT session.
 - Session v1 failover still stalls for up to `max(4 × probe_interval, 3 s)`, plus a dial timeout when the next route must be dialed.
 - Invariant in `session`: a path's reader never writes to the path; control writes go through its control loop. Breaking it deadlocks two full pipes.
+
+**Phase 3 status: done.** Session v2 (ADR-0013: multipath packets, per-path SACK and loss detection, retransmission on another path, per-stream flow control with final sizes, VIP duplication, per-path congestion window), `fec` and QUIC datagram paths (ADR-0014), the `quic` transport (`quic-go`), and the adaptive `controller` (ADR-0015: path ranks with hysteresis, adaptive FEC parity, lossy-path replacement, transport demotion, peer health). v2 is the default; `session.version = 1` keeps v1. The panel shows loss and jitter per path and edits QUIC endpoints and port ranges. The chaos suite runs Phase 1 on v1 against a v2 node, Phase 2 on v2, and a Phase 3 scenario: random 5 % loss on two QUIC paths must raise FEC and be repaired by it, then TLS and one QUIC path are blackholed, with no stall over 2 s. Notes for Phase 4:
+- `skip_double_encryption` is still ignored: v2 packs frames of several streams into one encrypted packet (ADR-0013 §Consequences).
+- UDP flows still ride reliable streams; an unreliable datagram stream type would let QUIC-based inbounds (Hysteria2, TUIC) skip retransmission.
+- QUIC uses `crypto/tls`, so its ClientHello is Go's, not a browser's (the `tls` transport uses uTLS); `hop_interval` (changing ports during a session) is not implemented.
+- `quic-go` keeps its own Cubic congestion control under our datagrams, so random loss still lowers a QUIC path's rate although FEC repairs it (ADR-0014); a plain UDP datagram transport with Marmot's own congestion control would lift this. In chaos runs the longest stall with one lossy QUIC path left was 0.5–1.2 s, against under 100 ms on TCP-based paths.
+- Phase 2's relay fallback is now immediate in v2: the link joins a relayed path as soon as no direct path is healthy, on its own goroutine (`node/link_paths.go`).
+- The controller's FEC sizing assumes loss is about the same in both directions (ADR-0015 §3).
+- Invariant in session v2: each path has exactly one writer goroutine, which also sends CLOSE; batched records (`frame.Conn.AppendRecord`) depend on it.
 
 ---
 

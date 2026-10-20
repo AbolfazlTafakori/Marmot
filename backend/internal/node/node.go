@@ -75,6 +75,10 @@ type Node struct {
 
 	transit      atomic.Int64  // relayed paths passing through this node now
 	transitBytes atomic.Uint64 // bytes of ended relayed paths
+
+	dials dialLog      // dial results for the controller
+	ctlMu sync.Mutex   // guards ctl
+	ctl   controlState // the controller's latest view, for status and routing
 }
 
 // byteTotals are bytes sent to and received from a peer.
@@ -159,6 +163,8 @@ func (n *Node) Start() error {
 
 	errs := []error{n.applyListeners(cfg)}
 	n.applyLinks(nil, cfg)
+	n.wg.Add(1)
+	go n.controlLoop(ctx)
 	if err := st.Update(steeringRules(cfg)); err != nil {
 		errs = append(errs, err)
 	}
@@ -217,14 +223,14 @@ func (n *Node) stopLocked() {
 }
 
 // onInbound starts serving a session a peer dialed to us.
-func (n *Node) onInbound(s *session.MuxSession) {
+func (n *Node) onInbound(s session.PeerSession) {
 	n.events.publish(EventPeerState, map[string]any{"peer": s.Peer(), "state": "up", "direction": "inbound"})
 	n.serveSession(s)
 }
 
 // serveSession accepts the peer's streams on s and delivers them locally
 // until s ends.
-func (n *Node) serveSession(s *session.MuxSession) {
+func (n *Node) serveSession(s session.PeerSession) {
 	n.mu.RLock()
 	ctx, fwd := n.ctx, n.forwarder
 	for _, l := range n.links {
@@ -256,7 +262,7 @@ func (n *Node) serveSession(s *session.MuxSession) {
 // foldSession adds an ended session's bytes to its peer's totals. The
 // stream accept loop ends exactly when the session does, so each session
 // is folded once.
-func (n *Node) foldSession(s *session.MuxSession) {
+func (n *Node) foldSession(s session.PeerSession) {
 	<-s.Done()
 	st := s.Stats()
 	n.totalsMu.Lock()

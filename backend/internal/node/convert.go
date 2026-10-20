@@ -75,13 +75,28 @@ const minDeadAfter = 3 * time.Second
 
 func connConfig(c *config.Config, log *slog.Logger) session.ConnConfig {
 	probe := c.Session.ProbeInterval.D()
+	data, parity := fecStart(c)
 	return session.ConnConfig{
 		SendBuffer:    int(c.Session.SendBuffer),
 		ProbeInterval: probe,
 		DeadAfter:     max(4*probe, minDeadAfter),
 		ResumeTimeout: c.Session.ResumeTimeout.D(),
+		FECData:       data,
+		FECParity:     parity,
 		Logger:        log,
 	}
+}
+
+// fecStart is the FEC group a v2 session starts with: fixed mode sends
+// its parity from the first packet; adaptive waits for the controller.
+func fecStart(c *config.Config) (data, parity int) {
+	switch c.FEC.Mode {
+	case "fixed":
+		return c.FEC.DataShards, c.FEC.MaxParityShards
+	case "adaptive":
+		return c.FEC.DataShards, 0
+	}
+	return 0, 0
 }
 
 func peerKeys(c *config.Config) (*session.PeerKeys, error) {
@@ -97,10 +112,15 @@ func peerKeys(c *config.Config) (*session.PeerKeys, error) {
 	return session.NewPeerKeys(m)
 }
 
+// localCaps are the capabilities this node offers, dialing and accepting.
+// Offering CapMultipath selects session v2 with a peer that offers it too.
 func localCaps(c *config.Config) uint32 {
 	caps := crypto.CapUDP
 	if c.Relay.AllowTransit {
 		caps |= crypto.CapRelay
+	}
+	if c.Session.Version == 2 {
+		caps |= crypto.CapMultipath
 	}
 	return caps
 }

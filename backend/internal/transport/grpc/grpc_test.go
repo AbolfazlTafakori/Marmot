@@ -2,8 +2,15 @@ package grpc
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
+	"net"
+	"net/netip"
 	"testing"
+	"time"
+
+	"marmot/internal/transport"
 )
 
 func msg(flag byte, payload string) []byte {
@@ -63,4 +70,45 @@ func FuzzConnRead(f *testing.F) {
 			}
 		}
 	})
+}
+
+// A client that gives up while the session handshake runs ends the HTTP
+// handler; the handshake's deadline cleanup must then leave the response
+// writer alone (it raced with net/http and could panic).
+func TestDeadlineAfterClientLeft(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	l, err := Transport{}.Listen(ctx, transport.ListenConfig{Addr: netip.MustParseAddrPort("127.0.0.1:0")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	accepted := make(chan transport.Conn, 1)
+	go func() {
+		if c, err := l.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+	c, err := Transport{}.Dial(ctx, transport.Endpoint{Addr: netip.MustParseAddrPort(l.Addr().String())}, netip.Addr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	s := <-accepted
+	d := s.(interface{ SetDeadline(time.Time) error })
+	if err := d.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("deadline while the call is live: %v", err)
+	}
+	_ = c.Close()
+	for start := time.Now(); d.SetDeadline(time.Time{}) == nil; {
+		if time.Since(start) > 5*time.Second {
+			t.Fatal("handler never ended after the client left")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := d.SetDeadline(time.Time{}); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("deadline after the handler ended: %v", err)
+	}
 }

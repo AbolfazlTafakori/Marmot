@@ -102,6 +102,40 @@ func TestPlannerPrefersDiversity(t *testing.T) {
 	}
 }
 
+// A demoted transport goes after the others of equal diversity, but
+// diversity still wins and nothing is ever dropped (ADR-0015).
+func TestPlannerPreference(t *testing.T) {
+	cands := []Candidate{
+		cand("tls", "", "192.0.2.1:443"),
+		cand("quic", "", "192.0.2.1:443"),
+		cand("tls", "", "[2001:db8::1]:443"),
+	}
+	p := NewPlanner(cands, nil)
+	p.SetPreference(func(c Candidate) int {
+		if c.Transport == "tls" {
+			return 1000 // demoted
+		}
+		return 0
+	})
+	for range 3 {
+		c, _, ok := p.Next(nil, Direct)
+		if !ok || c.Transport != "quic" {
+			t.Fatalf("with nothing up, got %v; want the preferred quic route every time", c)
+		}
+	}
+	// With quic over IPv4 up, the IPv6 route is more diverse than the
+	// other IPv4 one: diversity beats the demotion.
+	c, _, ok := p.Next([]Route{cands[1].Route()}, Direct)
+	if !ok || c.Key() != cands[2].Key() {
+		t.Fatalf("got %v, want the IPv6 tls route", c)
+	}
+	// Only demoted routes left: still tried.
+	p.Failed(cands[1])
+	if c, _, ok := p.Next(nil, Direct); !ok || c.Transport != "tls" {
+		t.Fatalf("demoted routes not tried when nothing else is left: %v %v", c, ok)
+	}
+}
+
 func TestPlannerRoundRobinWithoutPathsUp(t *testing.T) {
 	cands := []Candidate{
 		cand("tcp", "", "192.0.2.1:1"), cand("tcp", "", "192.0.2.1:2"), cand("tcp", "", "192.0.2.1:3"),

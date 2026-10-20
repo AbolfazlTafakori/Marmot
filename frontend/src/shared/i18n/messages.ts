@@ -124,6 +124,7 @@ export const en = {
     sni: 'Server name (SNI)',
     wsPath: 'WebSocket path',
     grpcService: 'gRPC service',
+    quicAlpn: 'QUIC ALPN',
     addEndpoint: 'Add endpoint',
     inboundOnly: 'Inbound only: this peer connects to us.',
     paths: 'Paths',
@@ -131,6 +132,8 @@ export const en = {
     local: 'Local',
     remote: 'Remote',
     throughput: 'Throughput',
+    loss: 'Loss',
+    jitter: 'Jitter',
     confirmDelete: 'Delete peer {id}? Its sessions close at once.',
   },
   config: {
@@ -317,6 +320,7 @@ export const fa: Messages = {
     sni: 'نام سرور (SNI)',
     wsPath: 'مسیر وب‌سوکت',
     grpcService: 'نام سرویس gRPC',
+    quicAlpn: 'پروتکل ALPN در QUIC',
     addEndpoint: 'افزودن نقطه‌ی اتصال',
     inboundOnly: 'فقط ورودی: این همتا خودش به این سرور وصل می‌شود.',
     paths: 'مسیرها',
@@ -324,6 +328,8 @@ export const fa: Messages = {
     local: 'سمت ما',
     remote: 'سمت همتا',
     throughput: 'گذردهی',
+    loss: 'افت بسته',
+    jitter: 'نوسان تأخیر',
     confirmDelete: 'همتای {id} حذف شود؟ نشست‌هایش همان لحظه بسته می‌شود.',
   },
   config: {

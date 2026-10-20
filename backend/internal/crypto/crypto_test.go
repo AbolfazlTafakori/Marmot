@@ -67,6 +67,13 @@ func TestHandshakeAndTransport(t *testing.T) {
 	if !bytes.Equal(r.acc.PeerKey, client.PublicKey()) || r.acc.Hello.NodeID != "iran-01" || r.acc.Hello.SessionID[0] != 7 {
 		t.Fatalf("accepted %+v", r.acc.Hello)
 	}
+	if cp.Binding != r.acc.Ciphers.Binding || cp.Binding == ([32]byte{}) {
+		t.Fatalf("bindings differ or are empty: %x %x", cp.Binding, r.acc.Ciphers.Binding)
+	}
+	cp2, _, r2, err := runHandshake(t, client, server, resp, hello, StatusOK)
+	if err != nil || r2.err != nil || cp2.Binding == cp.Binding {
+		t.Fatalf("a second handshake must have its own binding: %v %v", err, r2.err)
+	}
 	ct, err := cp.Send.Encrypt(nil, nil, []byte("ping"))
 	if err != nil {
 		t.Fatal(err)

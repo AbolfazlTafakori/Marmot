@@ -115,6 +115,7 @@ func (n *Node) linkDeps(c *config.Config) linkDeps {
 		serve:          n.serveSession,
 		relayVias:      n.relayVias,
 		dialRelay:      n.dialRelay,
+		reportDial:     n.dials.add,
 		log:            n.log.With("component", "link"),
 	}
 }

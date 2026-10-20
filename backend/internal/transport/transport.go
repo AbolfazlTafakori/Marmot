@@ -48,6 +48,20 @@ type Conn interface {
 	RemoteAddr() net.Addr
 }
 
+// Datagrammer is implemented by a Conn that can also carry unreliable
+// datagrams beside its stream (QUIC, RFC 9221). Session v2 moves a path's
+// records to datagrams when DatagramsEnabled is true; both ends of the
+// connection see the same value (ADR-0014).
+type Datagrammer interface {
+	DatagramsEnabled() bool
+	// MaxDatagramSize is the largest datagram SendDatagram accepts for
+	// the life of the connection.
+	MaxDatagramSize() int
+	SendDatagram(b []byte) error
+	// ReceiveDatagram returns the next datagram; the caller owns it.
+	ReceiveDatagram(ctx context.Context) ([]byte, error)
+}
+
 // PacketConn is a Datagram-kind connection.
 type PacketConn interface {
 	ReadPacket(b []byte) (int, error)

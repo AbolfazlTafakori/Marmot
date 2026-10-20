@@ -289,7 +289,7 @@ func activePathIndex(t *testing.T, c *ResumableConn) int {
 	return int(c.active.id - 1)
 }
 
-func waitFor(t *testing.T, cond func() bool) {
+func waitFor(t testing.TB, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for !cond() {

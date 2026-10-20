@@ -17,7 +17,10 @@ type PathMeta struct {
 
 func (m PathMeta) String() string { return m.Transport + " " + m.Local + "->" + m.Remote }
 
-// PathInfo describes one path of a session for status and logs.
+// PathInfo describes one path of a session for status, logs and the
+// controller. In v1 Active marks the one active path; in v2, which uses
+// every path, it marks the first-ranked one. The fields after Registered
+// are set by v2 only.
 type PathInfo struct {
 	ID         uint64
 	Meta       PathMeta
@@ -27,6 +30,22 @@ type PathInfo struct {
 	BytesSent  uint64
 	BytesRecv  uint64
 	Registered time.Time
+
+	RTTVar      time.Duration
+	Datagram    bool // records travel in datagrams (FEC applies)
+	Suspect     bool // probe timeout: takes no new data until acknowledged
+	Draining    bool // being retired after a rotation
+	PacketsSent uint64
+	PacketsLost uint64
+	Recovered   uint64 // packets rebuilt by FEC
+	// PacketsRecv counts packets that arrived; RecvSpan is how many packet
+	// numbers the peer used. Their gap is the raw loss of the incoming
+	// direction, before FEC.
+	PacketsRecv uint64
+	RecvSpan    uint64
+	Loss        float64 // smoothed fraction of packets lost
+	Cwnd        int
+	InFlight    int
 }
 
 // ctrlQueue bounds control writes waiting for a path. Only PONGs arrive at

@@ -32,7 +32,8 @@ port = 2083
 options = { path = "/ws" }            # tls, cert_file, key_file, sni as for tls
 [[transport_listen]]
 transport = "quic"
-port_range = "40000-50000"
+port_range = "40000-40099"             # at most 256 ports; each one is bound
+# quic options: alpn (default "h3"), cert_file, key_file, sni as for tls
 
 # ---------------------------------------------------------------
 # Panel integration (relay mode, applied on the receiving node)
@@ -58,12 +59,13 @@ ipv6_rotation = { enabled = true, epoch = "5m", active = 4 }
 # Session behaviour
 # ---------------------------------------------------------------
 [session]
+version = 2                           # 2: multipath (ADR-0013); 1: one active path
 rotate_bytes = "25MiB"
 rotate_interval = "10m"
-standby_paths = 2                     # v1: hot-standby count per peer
+standby_paths = 2                     # extra paths kept up per peer (v2 uses them all)
 
-[fec]
-mode = "adaptive"                     # off | fixed | adaptive
+[fec]                                 # QUIC datagram paths only (ADR-0014)
+mode = "adaptive"                     # off | fixed | adaptive (controller sizes parity from loss)
 data_shards = 4
 max_parity_shards = 3
 
@@ -98,9 +100,10 @@ ipv6_subnet = "2001:db8:2::/64"         # Phase 4: rotating addresses
 
   [[peers.endpoints]]
   transport = "quic"
-  port_range = "40000-50000"
-  hop_interval = "30s"
+  port_range = "40000-40099"
+  # hop_interval = "30s"              # Phase 4: change port during a session
   family = "ipv6"
+  # quic options: sni, alpn (default "h3"), datagrams (default true)
 
 [[peers]]
 id = "kharej-finland-02"

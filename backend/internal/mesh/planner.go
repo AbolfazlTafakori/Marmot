@@ -79,8 +79,14 @@ type Planner struct {
 	direct []Candidate
 	relays []Candidate
 	q      *quarantine
-	next   int // rotates ties so equal candidates take turns
+	next   int                 // rotates ties so equal candidates take turns
+	pref   func(Candidate) int // lower first among equally diverse; nil = none
 }
+
+// SetPreference sets how the controller ranks candidates that are equally
+// diverse: lower values are tried first (ADR-0015). Diversity still comes
+// first, so a demoted transport is tried after the others, never dropped.
+func (p *Planner) SetPreference(pref func(Candidate) int) { p.pref = pref }
 
 // NewPlanner returns a planner over cands; now is the clock (nil = time.Now).
 func NewPlanner(cands []Candidate, now func() time.Time) *Planner {
@@ -124,7 +130,7 @@ func (p *Planner) Next(inUse []Route, kinds Kinds) (Candidate, time.Duration, bo
 	if kinds&Relayed != 0 {
 		pool = append(pool, p.relays...)
 	}
-	best, bestScore := -1, -1
+	best, bestScore, bestPref := -1, -1, 0
 	n := len(pool)
 	for k := range n {
 		i := (p.next + k) % n
@@ -136,11 +142,15 @@ func (p *Planner) Next(inUse []Route, kinds Kinds) (Candidate, time.Duration, bo
 		for _, r := range inUse {
 			score = min(score, distance(c.Route(), r))
 		}
+		pref := 0
+		if p.pref != nil {
+			pref = p.pref(c)
+		}
 		// A route already up scores 0 and is taken only when nothing else
 		// is free: a second connection on it still survives a reset of the
 		// first.
-		if score > bestScore {
-			best, bestScore = i, score
+		if score > bestScore || (score == bestScore && pref < bestPref) {
+			best, bestScore, bestPref = i, score, pref
 		}
 	}
 	if best >= 0 {

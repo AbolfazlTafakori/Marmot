@@ -1094,7 +1094,7 @@ export interface components {
             state: "up" | "degraded" | "relayed" | "down";
             activePaths: number;
             rttMs: number;
-            /** @description 0 until the adaptive controller (Phase 3) */
+            /** @description Smoothed loss of the active path in percent */
             lossPct: number;
         };
         PeerView: components["schemas"]["Peer"] & {
@@ -1109,10 +1109,12 @@ export interface components {
             /** @enum {string} */
             role: "active" | "standby" | "quarantined" | "probing";
             rttMs: number;
+            /** @description RTT variance of the path */
             jitterMs: number;
+            /** @description Smoothed loss in percent; 0 for a session v1 path */
             lossPct: number;
             throughputBps: number;
-            /** @description Phase 1 heuristic until the controller (ADR-0009) */
+            /** @description Higher is better. The adaptive controller's path score mapped to 0..1 (ADR-0015); an RTT estimate for a session v1 path or one not rated yet. */
             score: number;
             /** Format: date-time */
             quarantinedUntil?: string;

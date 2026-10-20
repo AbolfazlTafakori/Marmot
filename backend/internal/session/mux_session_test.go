@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"io"
 	"net/netip"
 	"reflect"
@@ -20,21 +21,34 @@ import (
 type testServer struct {
 	acc      *Acceptor
 	addr     netip.AddrPort
-	sessions chan *MuxSession
+	caps     uint32 // offered by both sides
+	sessions chan PeerSession
 }
 
-// startServer runs an acceptor for node "b" that knows the given peers.
-func startServer(t *testing.T, peers map[core.NodeID]ed25519.PublicKey) *testServer {
+// versionCaps are the capabilities that select each session version.
+var versionCaps = map[int]uint32{1: crypto.CapUDP, 2: crypto.CapUDP | crypto.CapMultipath}
+
+// forEachVersion runs a test once per session version: both implement the
+// same PeerSession contract.
+func forEachVersion(t *testing.T, f func(t *testing.T, version int)) {
+	for _, v := range []int{1, 2} {
+		t.Run(fmt.Sprintf("v%d", v), func(t *testing.T) { f(t, v) })
+	}
+}
+
+// startServer runs an acceptor for node "b" that knows the given peers and
+// speaks the given session version.
+func startServer(t testing.TB, peers map[core.NodeID]ed25519.PublicKey, version int) *testServer {
 	t.Helper()
 	keys, err := NewPeerKeys(peers)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := &testServer{sessions: make(chan *MuxSession, 4)}
+	ts := &testServer{caps: versionCaps[version], sessions: make(chan PeerSession, 4)}
 	ts.acc, err = NewAcceptor(AcceptorConfig{
-		Local: idB, Peers: keys, Caps: crypto.CapUDP,
+		Local: idB, Peers: keys, Caps: ts.caps,
 		Conn:      testConnConfig(Responder),
-		OnSession: func(s *MuxSession) { ts.sessions <- s },
+		OnSession: func(s PeerSession) { ts.sessions <- s },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +74,7 @@ func startServer(t *testing.T, peers map[core.NodeID]ed25519.PublicKey) *testSer
 	return ts
 }
 
-func (ts *testServer) dialRaw(t *testing.T) transport.Conn {
+func (ts *testServer) dialRaw(t testing.TB) transport.Conn {
 	t.Helper()
 	c, err := tcp.Transport{}.Dial(context.Background(), transport.Endpoint{Addr: ts.addr}, netip.Addr{})
 	if err != nil {
@@ -69,17 +83,17 @@ func (ts *testServer) dialRaw(t *testing.T) transport.Conn {
 	return c
 }
 
-func (ts *testServer) dial(t *testing.T, local *crypto.Identity, localID core.NodeID) (*MuxSession, error) {
+func (ts *testServer) dial(t *testing.T, local *crypto.Identity, localID core.NodeID) (PeerSession, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return Dial(ctx, DialConfig{
 		Local: local, LocalID: localID, Peer: "b", PeerKey: idB.PublicKey(),
-		Caps: crypto.CapUDP | crypto.CapRelay, Conn: testConnConfig(Initiator),
+		Caps: ts.caps | crypto.CapRelay, Conn: testConnConfig(Initiator),
 	}, ts.dialRaw(t), PathMeta{Transport: "tcp"})
 }
 
-func (ts *testServer) next(t *testing.T) *MuxSession {
+func (ts *testServer) next(t testing.TB) PeerSession {
 	t.Helper()
 	select {
 	case s := <-ts.sessions:
@@ -93,16 +107,21 @@ func (ts *testServer) next(t *testing.T) *MuxSession {
 var testHeader = frame.StreamHeader{Proto: core.ProtoTCP, Class: core.ClassTunneled, TargetPort: 443,
 	Client: netip.MustParseAddrPort("203.0.113.5:40000")}
 
-func TestStreamEndToEnd(t *testing.T) {
-	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()})
+func TestStreamEndToEnd(t *testing.T) { forEachVersion(t, testStreamEndToEnd) }
+
+func testStreamEndToEnd(t *testing.T, version int) {
+	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()}, version)
 	a, err := ts.dial(t, idA, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer a.Close()
 	b := ts.next(t)
-	if b.Peer() != "a" || a.Caps() != crypto.CapUDP || b.Caps() != crypto.CapUDP {
+	if b.Peer() != "a" || a.Caps() != ts.caps || b.Caps() != ts.caps {
 		t.Fatalf("peer %q caps %b/%b", b.Peer(), a.Caps(), b.Caps())
+	}
+	if a.Version() != version || b.Version() != version {
+		t.Fatalf("versions %d/%d, want %d", a.Version(), b.Version(), version)
 	}
 
 	go func() {
@@ -151,8 +170,10 @@ func TestStreamEndToEnd(t *testing.T) {
 	}
 }
 
-func TestJoinAddsStandbyPath(t *testing.T) {
-	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()})
+func TestJoinAddsStandbyPath(t *testing.T) { forEachVersion(t, testJoinAddsStandbyPath) }
+
+func testJoinAddsStandbyPath(t *testing.T, version int) {
+	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()}, version)
 	a, err := ts.dial(t, idA, "a")
 	if err != nil {
 		t.Fatal(err)
@@ -168,14 +189,14 @@ func TestJoinAddsStandbyPath(t *testing.T) {
 	}
 	// The rotated-out path is closed on both sides.
 	waitFor(t, func() bool { return len(a.Stats().Paths) == 2 && len(b.Stats().Paths) == 2 })
-	if a.Stats().Epoch != 2 {
+	if version == 1 && a.Stats().Epoch != 2 {
 		t.Fatalf("epoch %d", a.Stats().Epoch)
 	}
 }
 
 func TestJoinOtherPeersSessionRejected(t *testing.T) {
 	idC := mustIdentity()
-	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey(), "c": idC.PublicKey()})
+	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey(), "c": idC.PublicKey()}, 1)
 	a, err := ts.dial(t, idA, "a")
 	if err != nil {
 		t.Fatal(err)
@@ -191,14 +212,16 @@ func TestJoinOtherPeersSessionRejected(t *testing.T) {
 }
 
 func TestUnknownPeerRejected(t *testing.T) {
-	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()})
+	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()}, 2)
 	if _, err := ts.dial(t, mustIdentity(), "x"); err == nil {
 		t.Fatal("unknown peer was accepted")
 	}
 }
 
-func TestRevocationClosesSession(t *testing.T) {
-	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()})
+func TestRevocationClosesSession(t *testing.T) { forEachVersion(t, testRevocationClosesSession) }
+
+func testRevocationClosesSession(t *testing.T, version int) {
+	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()}, version)
 	a, err := ts.dial(t, idA, "a")
 	if err != nil {
 		t.Fatal(err)
@@ -208,7 +231,7 @@ func TestRevocationClosesSession(t *testing.T) {
 	waitFor(t, func() bool { return a.Stats().Ready })
 	empty, _ := NewPeerKeys(nil)
 	ts.acc.SetPeers(empty)
-	for _, s := range []*MuxSession{a, b} {
+	for _, s := range []PeerSession{a, b} {
 		select {
 		case <-s.Done():
 		case <-time.After(3 * time.Second):
@@ -227,8 +250,10 @@ func TestPeerKeysRejectsSharedKey(t *testing.T) {
 	}
 }
 
-func TestAwaitReply(t *testing.T) {
-	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()})
+func TestAwaitReply(t *testing.T) { forEachVersion(t, testAwaitReply) }
+
+func testAwaitReply(t *testing.T, version int) {
+	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()}, version)
 	a, err := ts.dial(t, idA, "a")
 	if err != nil {
 		t.Fatal(err)

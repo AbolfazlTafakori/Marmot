@@ -1,10 +1,10 @@
 package node
 
 import (
-	"encoding/hex"
 	"sort"
 	"time"
 
+	"marmot/internal/controller"
 	"marmot/internal/core"
 	"marmot/internal/forwarder"
 	"marmot/internal/session"
@@ -54,12 +54,24 @@ type PeerStatus struct {
 type SessionStatus struct {
 	ID        string
 	Outbound  bool
+	Version   int // session protocol: 1 or 2 (ADR-0013)
 	Started   time.Time
 	Ready     bool
 	Streams   int
 	BytesSent uint64
 	BytesRecv uint64
-	Paths     []session.PathInfo
+	// FECData and FECParity are the FEC group on datagram paths (v2);
+	// parity 0 means off.
+	FECData, FECParity int
+	Paths              []PathStatus
+}
+
+// PathStatus is one path with the controller's view of it.
+type PathStatus struct {
+	session.PathInfo
+	Scored bool    // the controller has rated the path (v2 only)
+	Score  float64 // lower is better, roughly milliseconds
+	Loss   float64 // smoothed fraction of packets lost, both directions
 }
 
 // ListenerStatus is one inter-node listener.
@@ -78,14 +90,17 @@ func (n *Node) Snapshot() Status {
 	}
 	byPeer := map[core.NodeID][]SessionStatus{}
 	// Ended sessions are left out: their bytes move to the closed totals.
+	n.ctlMu.Lock()
+	scores := n.ctl.scores
+	n.ctlMu.Unlock()
 	for id, l := range n.links {
 		if s := l.session(); s != nil && live(s) {
-			byPeer[id] = append(byPeer[id], sessionStatus(s, true))
+			byPeer[id] = append(byPeer[id], sessionStatus(s, true, scores))
 		}
 	}
 	for _, s := range n.acceptor.Sessions() {
 		if live(s) {
-			byPeer[s.Peer()] = append(byPeer[s.Peer()], sessionStatus(s, false))
+			byPeer[s.Peer()] = append(byPeer[s.Peer()], sessionStatus(s, false, scores))
 		}
 	}
 	n.totalsMu.Lock()
@@ -99,9 +114,9 @@ func (n *Node) Snapshot() Status {
 		id := core.NodeID(p.ID)
 		ps := PeerStatus{ID: id, Weight: p.Weight, State: PeerDown, Sessions: byPeer[id],
 			BytesSent: closed[id].sent, BytesRecv: closed[id].recv}
-		for _, s := range ps.Sessions {
-			ps.BytesSent += s.BytesSent
-			ps.BytesRecv += s.BytesRecv
+		for j := range ps.Sessions {
+			ps.BytesSent += ps.Sessions[j].BytesSent
+			ps.BytesRecv += ps.Sessions[j].BytesRecv
 		}
 		ps.State = peerState(ps.Sessions)
 		st.Peers = append(st.Peers, ps)
@@ -121,7 +136,8 @@ func (n *Node) Snapshot() Status {
 // ready, and down without sessions.
 func peerState(ss []SessionStatus) string {
 	state := PeerDown
-	for _, s := range ss {
+	for i := range ss {
+		s := &ss[i]
 		switch {
 		case !s.Ready:
 			if state == PeerDown {
@@ -145,7 +161,7 @@ func (s *SessionStatus) relayed() bool {
 	return false
 }
 
-func live(s *session.MuxSession) bool {
+func live(s session.PeerSession) bool {
 	select {
 	case <-s.Done():
 		return false
@@ -154,19 +170,30 @@ func live(s *session.MuxSession) bool {
 	}
 }
 
-func sessionStatus(s *session.MuxSession, outbound bool) SessionStatus {
+func sessionStatus(s session.PeerSession, outbound bool, scores map[string]map[uint64]controller.PathScore) SessionStatus {
 	cs := s.Stats()
-	id := s.ID()
-	paths := cs.Paths
+	key := sessionKey(s)
+	paths := make([]PathStatus, 0, len(cs.Paths))
+	for i := range cs.Paths {
+		p := &cs.Paths[i]
+		ps := PathStatus{PathInfo: *p}
+		if sc, ok := scores[key][p.ID]; ok {
+			ps.Scored, ps.Score, ps.Loss = true, sc.Score, sc.Loss
+		}
+		paths = append(paths, ps)
+	}
 	sort.Slice(paths, func(i, j int) bool { return paths[i].ID < paths[j].ID })
 	return SessionStatus{
-		ID:        hex.EncodeToString(id[:8]),
+		ID:        key,
 		Outbound:  outbound,
+		Version:   s.Version(),
 		Started:   s.Started(),
 		Ready:     cs.Ready,
 		Streams:   s.NumStreams(),
 		BytesSent: cs.SentOff,
 		BytesRecv: cs.RecvOff,
+		FECData:   cs.FECData,
+		FECParity: cs.FECParity,
 		Paths:     paths,
 	}
 }

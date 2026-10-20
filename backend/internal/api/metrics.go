@@ -12,7 +12,7 @@ import (
 type logRecord = telemetry.LogRecord
 
 // Metrics returns the node's Prometheus metrics (ARCHITECTURE §13.3):
-// paths, sessions, streams, bytes, failovers and rotations.
+// paths, loss, FEC, sessions, streams, bytes, failovers and rotations.
 func Metrics(n *node.Node) []telemetry.Metric {
 	st := n.Snapshot()
 	up := 0.0
@@ -26,6 +26,9 @@ func Metrics(n *node.Node) []telemetry.Metric {
 	rtt := telemetry.Metric{Name: "marmot_path_rtt_seconds", Help: "Smoothed RTT of the active path.", Type: telemetry.Gauge}
 	streams := telemetry.Metric{Name: "marmot_streams", Help: "Open streams per peer.", Type: telemetry.Gauge}
 	bytes := telemetry.Metric{Name: "marmot_peer_bytes_total", Help: "Bytes exchanged with a peer since start.", Type: telemetry.Counter}
+	loss := telemetry.Metric{Name: "marmot_path_loss_ratio", Help: "Smoothed fraction of packets lost on a path (session v2).", Type: telemetry.Gauge}
+	fecParity := telemetry.Metric{Name: "marmot_fec_parity", Help: "FEC parity symbols per group on a session's datagram paths.", Type: telemetry.Gauge}
+	recovered := telemetry.Metric{Name: "marmot_fec_recovered_packets", Help: "Packets rebuilt by FEC on the live sessions of a peer.", Type: telemetry.Gauge}
 	for _, p := range st.Peers {
 		id := string(p.ID)
 		v, relayed := 0.0, 0.0
@@ -38,10 +41,22 @@ func Metrics(n *node.Node) []telemetry.Metric {
 		peerUp.Samples = append(peerUp.Samples, telemetry.Sample{Labels: map[string]string{"peer": id}, Value: v})
 		peerRelayed.Samples = append(peerRelayed.Samples, telemetry.Sample{Labels: map[string]string{"peer": id}, Value: relayed})
 		var active, standby, nstreams int
-		for _, ss := range p.Sessions {
+		var rebuilt uint64
+		for j := range p.Sessions {
+			ss := &p.Sessions[j]
 			nstreams += ss.Streams
+			if ss.Version == 2 {
+				fecParity.Samples = append(fecParity.Samples, telemetry.Sample{
+					Labels: map[string]string{"peer": id, "session": ss.ID}, Value: float64(ss.FECParity)})
+			}
 			for i := range ss.Paths {
 				pi := &ss.Paths[i]
+				rebuilt += pi.Recovered
+				if pi.Scored {
+					loss.Samples = append(loss.Samples, telemetry.Sample{
+						Labels: map[string]string{"peer": id, "transport": pi.Meta.Transport, "remote": pi.Meta.Remote},
+						Value:  pi.Loss})
+				}
 				if pi.Active {
 					active++
 					rtt.Samples = append(rtt.Samples, telemetry.Sample{
@@ -57,6 +72,7 @@ func Metrics(n *node.Node) []telemetry.Metric {
 			telemetry.Sample{Labels: map[string]string{"peer": id, "role": "active"}, Value: float64(active)},
 			telemetry.Sample{Labels: map[string]string{"peer": id, "role": "standby"}, Value: float64(standby)})
 		streams.Samples = append(streams.Samples, telemetry.Sample{Labels: map[string]string{"peer": id}, Value: float64(nstreams)})
+		recovered.Samples = append(recovered.Samples, telemetry.Sample{Labels: map[string]string{"peer": id}, Value: float64(rebuilt)})
 		bytes.Samples = append(bytes.Samples,
 			telemetry.Sample{Labels: map[string]string{"peer": id, "direction": "sent"}, Value: float64(p.BytesSent)},
 			telemetry.Sample{Labels: map[string]string{"peer": id, "direction": "received"}, Value: float64(p.BytesRecv)})
@@ -83,7 +99,7 @@ func Metrics(n *node.Node) []telemetry.Metric {
 		{Name: "marmot_go_sys_bytes", Help: "Bytes obtained from the OS.", Type: telemetry.Gauge,
 			Samples: []telemetry.Sample{{Value: float64(ms.Sys)}}},
 		{Name: "marmot_up", Help: "1 if the node is running.", Type: telemetry.Gauge, Samples: []telemetry.Sample{{Value: up}}},
-		peerUp, peerRelayed, sessions, paths, rtt, streams, bytes, portBytes, portConns,
+		peerUp, peerRelayed, sessions, paths, rtt, loss, fecParity, recovered, streams, bytes, portBytes, portConns,
 		{Name: "marmot_failovers_total", Help: "Active path failures that caused a failover.", Type: telemetry.Counter,
 			Samples: []telemetry.Sample{{Value: float64(counts[node.EventFailover])}}},
 		{Name: "marmot_rotations_total", Help: "Make-before-break path rotations.", Type: telemetry.Counter,

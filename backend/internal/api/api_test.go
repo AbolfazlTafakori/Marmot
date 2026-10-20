@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,14 +55,22 @@ func freePort(t *testing.T) uint16 {
 
 // freeTCPUDPPort returns a port that is free for both TCP and UDP. On
 // Windows a TCP-free port can sit in a range reserved for UDP (Hyper-V).
+// freeTCPUDPPort lets the OS pick a free UDP port and checks TCP on it:
+// Windows reserves UDP ranges (Hyper-V) that its TCP ephemeral ports fall
+// into, so starting from a TCP port often finds nothing.
 func freeTCPUDPPort(t *testing.T) uint16 {
 	t.Helper()
 	for i := 0; i < 50; i++ {
-		p := freePort(t)
-		u, err := net.ListenUDP("udp", &net.UDPAddr{Port: int(p)})
+		u, err := net.ListenUDP("udp", &net.UDPAddr{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := u.LocalAddr().(*net.UDPAddr).Port
+		l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)))
+		_ = u.Close()
 		if err == nil {
-			_ = u.Close()
-			return p
+			_ = l.Close()
+			return uint16(p)
 		}
 	}
 	t.Fatal("no port free for both TCP and UDP")

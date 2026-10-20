@@ -8,17 +8,21 @@ type Endpoint = Schemas['Endpoint'];
 
 interface EndpointDraft {
   transport: string;
+  /** A list ("9443, 2083") or a range ("40000-40099"). */
   ports: string;
   sni: string;
-  /** ws path or grpc service; other transports have none. */
+  /** ws path, grpc service or quic ALPN; other transports have none. */
   extra: string;
 }
 
-// Transports in this build (Phase 2). quic arrives with Phase 3.
-const transports = ['tls', 'tcp', 'ws', 'grpc'];
+// Transports in this build (Phase 3).
+const transports = ['tls', 'tcp', 'ws', 'grpc', 'quic'];
 
 /** The option each transport keeps in the extra field. */
-const extraOption: Record<string, string | undefined> = { ws: 'path', grpc: 'service' };
+const extraOption: Record<string, string | undefined> = { ws: 'path', grpc: 'service', quic: 'alpn' };
+const extraKeys = new Set(Object.values(extraOption));
+
+const extraPlaceholder: Record<string, string | undefined> = { grpc: 'marmot.Tunnel', quic: 'h3' };
 
 const usesTLS = (t: string) => t !== 'tcp';
 
@@ -30,30 +34,35 @@ function optionString(e: Endpoint, key: string | undefined): string {
 function toDraft(e: Endpoint): EndpointDraft {
   return {
     transport: e.transport,
-    ports: (e.ports ?? []).join(', '),
+    ports: e.portRange ?? (e.ports ?? []).join(', '),
     sni: optionString(e, 'sni'),
     extra: optionString(e, extraOption[e.transport]),
   };
 }
 
 function fromDraft(d: EndpointDraft, base?: Endpoint): Endpoint {
-  // Keep options this form does not edit; drop path/service of another
-  // transport so a changed transport carries none of them.
+  // Keep options this form does not edit; drop path/service/alpn of
+  // another transport so a changed transport carries none of them.
   const options: Record<string, unknown> = Object.fromEntries(
-    Object.entries(base?.options ?? {}).filter(([k]) => k !== 'path' && k !== 'service'),
+    Object.entries(base?.options ?? {}).filter(([k]) => !extraKeys.has(k)),
   );
   if (d.sni && usesTLS(d.transport)) options.sni = d.sni;
   else delete options.sni;
   const extraKey = extraOption[d.transport];
   if (extraKey && d.extra) options[extraKey] = d.extra;
+  const range = /^\s*(\d{1,5})\s*-\s*(\d{1,5})\s*$/.exec(d.ports);
   return {
     transport: d.transport,
     direction: 'outbound',
     family: base?.family ?? 'any',
-    ports: d.ports
-      .split(/[,\s]+/)
-      .filter(Boolean)
-      .map(Number),
+    ...(range
+      ? { portRange: `${range[1]}-${range[2]}` }
+      : {
+          ports: d.ports
+            .split(/[,\s]+/)
+            .filter(Boolean)
+            .map(Number),
+        }),
     ...(Object.keys(options).length ? { options } : {}),
   };
 }
@@ -71,6 +80,8 @@ export function PeerForm({
   onCancel: () => void;
 }) {
   const { m } = useI18n();
+  const extraLabel = (t: string) =>
+    t === 'grpc' ? m.peers.grpcService : t === 'quic' ? m.peers.quicAlpn : m.peers.wsPath;
   const [id, setId] = useState(initial?.id ?? '');
   const [publicKey, setPublicKey] = useState(initial?.publicKey ?? '');
   const [weight, setWeight] = useState(String(initial?.weight ?? 1));
@@ -177,7 +188,7 @@ export function PeerForm({
               <Input
                 ltr
                 required
-                placeholder="9443, 2083"
+                placeholder="9443, 2083 · 40000-40099"
                 value={d.ports}
                 onChange={(e) => {
                   setEp(i, { ports: e.target.value });
@@ -194,11 +205,11 @@ export function PeerForm({
                 }}
               />
             </Field>
-            <Field label={d.transport === 'grpc' ? m.peers.grpcService : m.peers.wsPath}>
+            <Field label={extraLabel(d.transport)}>
               <Input
                 ltr
                 disabled={!extraOption[d.transport]}
-                placeholder={d.transport === 'grpc' ? 'marmot.Tunnel' : '/'}
+                placeholder={extraPlaceholder[d.transport] ?? '/'}
                 value={d.extra}
                 onChange={(e) => {
                   setEp(i, { extra: e.target.value });

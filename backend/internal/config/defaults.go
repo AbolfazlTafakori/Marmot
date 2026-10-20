@@ -10,6 +10,7 @@ const (
 	DefaultAPIListen      = "0.0.0.0:7443"
 	DefaultDataDir        = "/var/lib/marmot"
 	DefaultLogLevel       = "info"
+	DefaultSessionVersion = 2
 	DefaultStandbyPaths   = 2
 	DefaultRelayMaxHops   = 2
 	DefaultPeerWeight     = 1
@@ -47,6 +48,7 @@ func (c *Config) ApplyDefaults() {
 	setInt(&c.Local.IPv6Rotation.Active, DefaultIPv6Active)
 
 	s := &c.Session
+	setInt(&s.Version, DefaultSessionVersion)
 	setSize(&s.RotateBytes, DefaultRotateBytes)
 	setDur(&s.RotateInterval, DefaultRotateInterval)
 	setInt(&s.StandbyPaths, DefaultStandbyPaths)

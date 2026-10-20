@@ -582,7 +582,7 @@ components:
         state: { type: string, enum: [up, degraded, relayed, down] }
         activePaths: { type: integer }
         rttMs: { type: number }
-        lossPct: { type: number, description: 0 until the adaptive controller (Phase 3) }
+        lossPct: { type: number, description: Smoothed loss of the active path in percent, as the adaptive controller measures it (ADR-0015) }
 
     PeerView:
       allOf:
@@ -602,14 +602,14 @@ components:
         transport: { type: string }
         role: { type: string, enum: [active, standby, quarantined, probing] }
         rttMs: { type: number }
-        jitterMs: { type: number }
-        lossPct: { type: number }
+        jitterMs: { type: number, description: RTT variance of the path }
+        lossPct: { type: number, description: Smoothed loss in percent; 0 for a session v1 path }
         throughputBps: { type: integer }
         score:
           type: number
           minimum: 0
           maximum: 1
-          description: Phase 1 heuristic until the controller (ADR-0009)
+          description: Higher is better. The adaptive controller's path score mapped to 0..1 (ADR-0015); an RTT estimate for a session v1 path or one not rated yet.
         quarantinedUntil: { type: string, format: date-time }
 
     TrafficSeries:

@@ -101,7 +101,7 @@ func TestJoinToken(t *testing.T) {
 		TransportListen: []config.TransportListen{
 			{Transport: "tls", Port: 9443, Options: map[string]any{"sni": "cdn.example.com", "cert_file": "/etc/secret.pem"}},
 			{Transport: "tls", Port: 2083, Options: map[string]any{"sni": "cdn.example.com"}},
-			{Transport: "quic", PortRange: config.PortRange{Lo: 40000, Hi: 40010}},
+			{Transport: "quic", PortRange: config.PortRange{Lo: 40000, Hi: 40010}, Options: map[string]any{"alpn": "doq"}},
 			{Transport: "ws", Port: 8080, Options: map[string]any{"path": "/edge", "tls": false, "key_file": "/k"}},
 			{Transport: "grpc", Port: 8443, Options: map[string]any{"service": "a.B"}},
 		},
@@ -115,14 +115,18 @@ func TestJoinToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.ID != "kharej-01" || p.Weight != 7 || p.PublicKey != config.FormatPublicKey(id.PublicKey()) ||
-		len(p.Endpoints) != 3 || len(p.Endpoints[0].Ports) != 2 || p.Endpoints[0].Options["sni"] != "cdn.example.com" ||
+		len(p.Endpoints) != 4 || len(p.Endpoints[0].Ports) != 2 || p.Endpoints[0].Options["sni"] != "cdn.example.com" ||
 		len(p.IPv6Pool) != 1 {
 		t.Fatalf("peer %+v", p)
 	}
-	if ws := p.Endpoints[1].Options; ws["path"] != "/edge" || ws["tls"] != false {
+	if q := p.Endpoints[1]; q.Transport != "quic" || q.PortRange != (config.PortRange{Lo: 40000, Hi: 40010}) ||
+		len(q.Ports) != 0 || q.Options["alpn"] != "doq" {
+		t.Fatalf("quic range endpoint %+v", q)
+	}
+	if ws := p.Endpoints[2].Options; ws["path"] != "/edge" || ws["tls"] != false {
 		t.Fatalf("ws options %+v", ws)
 	}
-	if g := p.Endpoints[2].Options; g["service"] != "a.B" {
+	if g := p.Endpoints[3].Options; g["service"] != "a.B" {
 		t.Fatalf("grpc options %+v", g)
 	}
 	for _, e := range p.Endpoints {
@@ -143,7 +147,7 @@ func TestJoinToken(t *testing.T) {
 	// IPv6 addresses alone are enough to dial.
 	c.Local.IPv4Pool = nil
 	tok, _ = makeJoinToken(c, id.PublicKey(), id.Sign, time.Unix(1, 0))
-	if p, _ := parseJoinToken(tok, 1); len(p.Endpoints) != 3 {
+	if p, _ := parseJoinToken(tok, 1); len(p.Endpoints) != 4 {
 		t.Fatalf("IPv6-only token lost its endpoints %+v", p.Endpoints)
 	}
 	// Without addresses the peer is inbound-only.

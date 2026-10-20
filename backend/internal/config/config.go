@@ -73,6 +73,10 @@ type IPv6Rotation struct {
 
 // Session tunes the session layer.
 type Session struct {
+	// Version selects the session protocol: 2 (multipath, ADR-0013) or 1
+	// (one active path). A version 2 node still talks version 1 to a peer
+	// that does not offer 2.
+	Version        int      `toml:"version,omitempty"`
 	RotateBytes    ByteSize `toml:"rotate_bytes,omitempty"`
 	RotateInterval Duration `toml:"rotate_interval,omitempty"`
 	StandbyPaths   int      `toml:"standby_paths,omitempty"`

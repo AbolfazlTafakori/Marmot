@@ -1,21 +1,30 @@
 #!/bin/sh
 # Chaos suite (ARCHITECTURE §16).
-# Phase 1: two real marmot processes joined by two TLS routes. While a
+# Phase 1: two real marmot processes joined by two TLS routes, on session v1
+# (kharej offers only v1, so this also checks v1 against a v2 node). While a
 # stream of data is verified byte for byte, iptables blackholes one route,
 # then the other; the stream must survive. Then the node is reloaded with
 # SIGHUP (a good and a bad config) and stopped with SIGTERM.
-# Phase 2: three processes, iran -> kharej over tls (IPv4 and IPv6), ws and
-# grpc, and a relay node. Direct routes are blackholed one by one until only
-# the relay is left, then restored; the stream must survive throughout and
-# the session must return to a direct path.
+# Phase 2: three processes on session v2, iran -> kharej over tls (IPv4 and
+# IPv6), ws and grpc, and a relay node. Direct routes are blackholed one by
+# one until only the relay is left, then restored; the stream must survive
+# with no stall over 2 s and the session must return to a direct path.
+# Phase 3: session v2 over two QUIC datagram paths and one TLS path. Random
+# 5 % loss on QUIC must raise FEC and be repaired by it; then TLS and one
+# QUIC path are blackholed. The stream must survive with no stall over 2 s.
 # Runs inside a Linux container with NET_ADMIN; use docker.sh.
 set -u
 fail() {
   echo "FAIL: $*"
-  for f in iran2.log relay.log kharej2.log; do
+  for f in iran2.log relay.log kharej2.log iran3.log kharej3.log; do
     [ -f "$f" ] && { echo "--- $f (last 80 lines)"; tail -n 80 "$f"; }
   done
   exit 1
+}
+# stall_ms FILE LIMIT: the chaos client's longest stall in FILE is below LIMIT ms.
+stall_ms() {
+  ms=$(sed -nE 's/.*longest stall ([0-9.]+)(ms|s|µs).*/\1 \2/p' "$1" | awk '{ v = $1; if ($2 == "s") v *= 1000; if ($2 == "µs") v /= 1000; print int(v) }')
+  [ -n "$ms" ] && [ "$ms" -lt "$2" ]
 }
 W=$(mktemp -d); cd "$W"
 if ! command -v iptables >/dev/null; then
@@ -30,6 +39,8 @@ cat > kharej.toml <<CFG
 [node]
 id = "kharej-01"
 identity_key_file = "kharej.key"
+[session]
+version = 1
 [[transport_listen]]
 transport = "tls"
 port = 9443
@@ -213,7 +224,7 @@ restore6()   { ip6tables -D OUTPUT -o lo -p tcp --dport "$1" -j DROP; ip6tables 
 relayed() { curl -s 127.0.0.1:29090/metrics | grep -q '^marmot_peer_relayed{peer="kharej-02"} 1'; }
 
 echo "== 60 s verified stream; blackhole tls/IPv4, tls/IPv6, ws, grpc, then restore all"
-./chaos -via 127.0.0.1:22062 -echo 127.0.0.1:23010 -for 60s -rate 4194304 & CP=$!
+./chaos -via 127.0.0.1:22062 -echo 127.0.0.1:23010 -for 60s -rate 4194304 > chaos2.out & CP=$!
 sleep 5;  blackhole 9543;  echo "   t=5   tls over IPv4 blocked"
 sleep 5;  blackhole6 9543; echo "   t=10  tls over IPv6 blocked"
 sleep 5;  blackhole 9544; blackhole6 9544; echo "   t=15  ws blocked (both families)"
@@ -223,7 +234,9 @@ R=0; for _ in $(seq 1 20); do if relayed; then R=1; break; fi; sleep 1; done
 echo "   relayed"
 sleep 3
 for p in 9543 9544 9545; do restore $p; restore6 $p; done; echo "   direct routes restored"
-wait $CP || fail "stream did not survive losing every direct route"
+wait $CP || { cat chaos2.out; fail "stream did not survive losing every direct route"; }
+cat chaos2.out
+stall_ms chaos2.out 2000 || fail "longest stall over 2000ms while the direct routes went one by one"
 D=0; for _ in $(seq 1 60); do if grep -q 'session back on a direct path' iran2.log; then D=1; break; fi; sleep 1; done
 [ $D -eq 1 ] || fail "session never left the relay after the direct routes came back"
 relayed && fail "metrics still say relayed"
@@ -236,4 +249,103 @@ echo "== SIGTERM (phase 2 nodes)"
 kill -TERM $I2P $RP $K2P; wait $I2P; A=$?; wait $RP; B=$?; wait $K2P; C=$?
 [ $A -eq 0 ] && [ $B -eq 0 ] && [ $C -eq 0 ] || fail "exit codes iran2=$A relay=$B kharej2=$C"
 if grep -h '"level":"ERROR"' iran2.log relay.log kharej2.log; then fail "errors in phase 2 logs"; fi
+grep -q '"msg":"inbound session".*"version":2' kharej2.log || fail "phase 2 did not run on session v2"
+
+# ---------------------------------------------------------------- Phase 3
+I3=$(./marmot keygen -out iran3.key); K3=$(./marmot keygen -out kharej3.key)
+cat > kharej3.toml <<CFG
+[node]
+id = "kharej-03"
+identity_key_file = "kharej3.key"
+[[transport_listen]]
+transport = "quic"
+port = 9643
+[[transport_listen]]
+transport = "quic"
+port = 9644
+[[transport_listen]]
+transport = "tls"
+port = 9645
+[fec]
+mode = "adaptive"
+data_shards = 4
+max_parity_shards = 3
+[[peers]]
+id = "iran-03"
+public_key = "$I3"
+[telemetry]
+metrics_listen = "127.0.0.1:29191"
+[api]
+listen = "127.0.0.1:27463"
+data_dir = "data-k3"
+CFG
+cat > iran3.toml <<CFG
+[node]
+id = "iran-03"
+identity_key_file = "iran3.key"
+[steering]
+tunneled_ports = [22072]
+[steering.port_map]
+22072 = 23020
+[session]
+probe_interval = "250ms"
+standby_paths = 2
+[fec]
+mode = "adaptive"
+data_shards = 4
+max_parity_shards = 3
+[telemetry]
+metrics_listen = "127.0.0.1:29190"
+[[peers]]
+id = "kharej-03"
+public_key = "$K3"
+ipv4_pool = ["127.0.0.1"]
+  [[peers.endpoints]]
+  transport = "quic"
+  ports = [9643, 9644]
+  [[peers.endpoints]]
+  transport = "tls"
+  ports = [9645]
+  options = { sni = "www.example.com" }
+[api]
+listen = "127.0.0.1:27465"
+data_dir = "data-i3"
+CFG
+./marmot run -config kharej3.toml 2> kharej3.log & K3P=$!
+./marmot run -config iran3.toml 2> iran3.log & I3P=$!
+sleep 3
+
+# UDP is dropped on INPUT: a DROP on OUTPUT fails sendmsg with EPERM, which
+# a sender sees, while loss in transit is silent.
+udploss()    { iptables -A INPUT -i lo -p udp --dport "$1" -m statistic --mode random --probability 0.05 -j DROP &&
+               iptables -A INPUT -i lo -p udp --sport "$1" -m statistic --mode random --probability 0.05 -j DROP; }
+udplossoff() { iptables -D INPUT -i lo -p udp --dport "$1" -m statistic --mode random --probability 0.05 -j DROP;
+               iptables -D INPUT -i lo -p udp --sport "$1" -m statistic --mode random --probability 0.05 -j DROP; }
+udpblock()   { iptables -A INPUT -i lo -p udp --dport "$1" -j DROP; iptables -A INPUT -i lo -p udp --sport "$1" -j DROP; }
+udprestore() { iptables -D INPUT -i lo -p udp --dport "$1" -j DROP; iptables -D INPUT -i lo -p udp --sport "$1" -j DROP; }
+metric()     { curl -s "127.0.0.1:$1/metrics" | awk -v m="$2" '$1 ~ "^"m"[{ ]" || $1 == m { s += $2 } END { print s + 0 }'; }
+
+echo "== 60 s verified stream; 5 % loss on QUIC, then tls and one QUIC path blackholed"
+./chaos -via 127.0.0.1:22072 -echo 127.0.0.1:23020 -for 60s -rate 4194304 > chaos3.out & CP=$!
+sleep 5;  udploss 9643 && udploss 9644 || fail "iptables statistic match unavailable"; echo "   t=5   5 % random loss on both QUIC paths"
+F=0; for _ in $(seq 1 15); do if grep -q '"msg":"fec level".*"parity":[1-9]' iran3.log kharej3.log; then F=1; break; fi; sleep 1; done
+[ $F -eq 1 ] || fail "FEC was not raised under 5 % loss"
+echo "   FEC raised: $(grep -h '"msg":"fec level"' iran3.log kharej3.log | sed -E 's/.*"parity":([0-9]+).*/parity \1/' | sort -u | tr '\n' ' ')"
+sleep 5
+# Read while the loss lasts: rotation retires paths and their counters.
+REC=$(( $(metric 29190 marmot_fec_recovered_packets) + $(metric 29191 marmot_fec_recovered_packets) ))
+echo "   packets rebuilt by FEC so far: $REC"
+[ "$REC" -gt 0 ] || fail "FEC rebuilt no packet under 5 % loss"
+sleep 5; blackhole 9645; echo "   t~25  tls blocked"
+sleep 10; udpblock 9643; echo "   t~35  QUIC 9643 blocked: one lossy QUIC path left"
+sleep 10; restore 9645; udprestore 9643; udplossoff 9643; udplossoff 9644; echo "   t~45  everything restored"
+wait $CP || { cat chaos3.out; fail "stream did not survive phase 3"; }
+cat chaos3.out
+stall_ms chaos3.out 2000 || fail "longest stall over 2000ms; session v2 must stay under it"
+grep -q '"msg":"failover"' iran3.log || fail "no failover logged in phase 3"
+
+echo "== SIGTERM (phase 3 nodes)"
+kill -TERM $I3P $K3P; wait $I3P; A=$?; wait $K3P; B=$?
+[ $A -eq 0 ] && [ $B -eq 0 ] || fail "exit codes iran3=$A kharej3=$B"
+if grep -h '"level":"ERROR"' iran3.log kharej3.log; then fail "errors in phase 3 logs"; fi
 echo "CHAOS SUITE PASSED"

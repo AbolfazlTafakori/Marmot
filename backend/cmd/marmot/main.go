@@ -11,6 +11,7 @@ import (
 	"marmot/internal/crypto"
 
 	_ "marmot/internal/transport/grpc"
+	_ "marmot/internal/transport/quic"
 	_ "marmot/internal/transport/tcp"
 	_ "marmot/internal/transport/tls"
 	_ "marmot/internal/transport/ws"

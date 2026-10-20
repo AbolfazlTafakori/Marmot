@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"marmot/internal/crypto"
-	"marmot/internal/frame"
 	"marmot/internal/transport"
 )
 
@@ -39,19 +38,19 @@ func boundHandshake(ctx context.Context, conn transport.Conn) func() {
 	}
 }
 
-// clientHandshake runs the initiator handshake on conn and wraps it in the
-// record layer. On error conn is closed.
+// clientHandshake runs the initiator handshake on conn and returns the
+// path keys; the caller builds the record layer. On error conn is closed.
 func clientHandshake(ctx context.Context, conn transport.Conn, local *crypto.Identity,
-	peer ed25519.PublicKey, hello crypto.Hello) (*frame.Conn, crypto.Welcome, error) {
+	peer ed25519.PublicKey, hello crypto.Hello) (crypto.CipherPair, crypto.Welcome, error) {
 	done := boundHandshake(ctx, conn)
 	keys, w, err := crypto.Initiate(conn, local, peer, hello)
 	done()
 	if err != nil {
 		_ = conn.Close()
 		if ctx.Err() != nil {
-			return nil, w, ctx.Err()
+			return keys, w, ctx.Err()
 		}
-		return nil, w, err
+		return keys, w, err
 	}
-	return frame.NewConn(conn, keys), w, nil
+	return keys, w, nil
 }

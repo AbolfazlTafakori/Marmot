@@ -10,11 +10,10 @@ import (
 	"marmot/internal/config"
 	"marmot/internal/core"
 	"marmot/internal/node"
-	"marmot/internal/session"
 )
 
 // sessionPath is the status type of one path, named here for brevity.
-type sessionPath = session.PathInfo
+type sessionPath = node.PathStatus
 
 func peerViewOf(p config.Peer, health map[string]node.PeerStatus) peerView {
 	v := peerView{ID: p.ID, PublicKey: p.PublicKey, Weight: p.Weight, IPv4Pool: p.IPv4Pool, IPv6Pool: p.IPv6Pool,

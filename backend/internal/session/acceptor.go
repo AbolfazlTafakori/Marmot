@@ -22,12 +22,13 @@ type AcceptorConfig struct {
 	Caps  uint32
 	Conn  ConnConfig // Role is set to Responder
 	// OnSession receives every new inbound session. It must not block.
-	OnSession func(*MuxSession)
+	OnSession func(PeerSession)
 	Logger    *slog.Logger
 }
 
 // Acceptor authenticates inbound paths and sorts them into sessions: a
-// Hello without JOIN starts a session, a JOIN adds a path to one.
+// Hello without JOIN starts a session (v2 when both sides offer
+// CapMultipath, else v1), a JOIN adds a path to one.
 type Acceptor struct {
 	cfg       AcceptorConfig
 	log       *slog.Logger
@@ -35,7 +36,7 @@ type Acceptor struct {
 	responder *crypto.Responder
 
 	mu       sync.Mutex
-	sessions map[crypto.SessionID]*MuxSession
+	sessions map[crypto.SessionID]acceptedSession
 	closed   bool
 	wg       sync.WaitGroup
 }
@@ -53,7 +54,7 @@ func NewAcceptor(cfg AcceptorConfig) (*Acceptor, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	a := &Acceptor{cfg: cfg, log: log, sessions: make(map[crypto.SessionID]*MuxSession)}
+	a := &Acceptor{cfg: cfg, log: log, sessions: make(map[crypto.SessionID]acceptedSession)}
 	a.peers.Store(cfg.Peers)
 	a.responder = crypto.NewResponder(cfg.Local, func(x []byte) (ed25519.PublicKey, bool) {
 		return a.peers.Load().lookupX25519(x)
@@ -66,16 +67,16 @@ func NewAcceptor(cfg AcceptorConfig) (*Acceptor, error) {
 func (a *Acceptor) SetPeers(k *PeerKeys) {
 	a.peers.Store(k)
 	a.mu.Lock()
-	var revoked []*MuxSession
+	var revoked []acceptedSession
 	for _, s := range a.sessions {
-		if pub, ok := k.KeyOf(s.peer); !ok || !pub.Equal(s.peerKey) {
+		if pub, ok := k.KeyOf(s.Peer()); !ok || !pub.Equal(s.PeerKey()) {
 			revoked = append(revoked, s)
 		}
 	}
 	a.mu.Unlock()
 	for _, s := range revoked {
-		a.log.Info("peer revoked; closing session", "peer", s.peer)
-		s.conn.shutdown(errors.New("peer revoked"), frame.CloseRevoked, true)
+		a.log.Info("peer revoked; closing session", "peer", s.Peer())
+		s.revoke()
 	}
 }
 
@@ -84,7 +85,7 @@ func (a *Acceptor) SetPeers(k *PeerKeys) {
 func (a *Acceptor) Handle(ctx context.Context, conn transport.Conn, meta PathMeta) error {
 	peers := a.peers.Load()
 	var (
-		join   *MuxSession
+		join   acceptedSession
 		peerID core.NodeID
 	)
 	done := boundHandshake(ctx, conn)
@@ -95,11 +96,11 @@ func (a *Acceptor) Handle(ctx context.Context, conn transport.Conn, meta PathMet
 		existing := a.sessions[h.SessionID]
 		if h.Flags&(crypto.FlagJoin|crypto.FlagRotate) != 0 {
 			// A path may only join a session of the same peer.
-			if existing == nil || !existing.peerKey.Equal(pub) {
+			if existing == nil || !existing.PeerKey().Equal(pub) {
 				return crypto.Welcome{Status: crypto.StatusUnknownSession}
 			}
 			join = existing
-			return crypto.Welcome{Status: crypto.StatusOK, Caps: existing.caps}
+			return crypto.Welcome{Status: crypto.StatusOK, Caps: existing.Caps()}
 		}
 		if existing != nil || a.closed {
 			return crypto.Welcome{Status: crypto.StatusRejected}
@@ -111,60 +112,77 @@ func (a *Acceptor) Handle(ctx context.Context, conn transport.Conn, meta PathMet
 		_ = conn.Close()
 		return fmt.Errorf("accept %s: %w", meta, err)
 	}
-	fc := frame.NewConn(conn, acc.Ciphers)
 	if acc.Hello.NodeID != peerID {
 		a.log.Warn("peer claims a different node id", "peer", peerID, "claimed", acc.Hello.NodeID)
 	}
 	if join != nil {
-		_, err := join.conn.AddPath(fc, meta)
-		return err
+		return join.addInbound(conn, acc.Ciphers, meta)
 	}
-	return a.startSession(acc, fc, peerID, meta)
+	return a.startSession(acc, conn, peerID, meta)
 }
 
-func (a *Acceptor) startSession(acc crypto.Accepted, fc *frame.Conn, peerID core.NodeID, meta PathMeta) error {
+// newSession builds the inbound session for a Hello without JOIN.
+func (a *Acceptor) newSession(acc crypto.Accepted, conn transport.Conn, peerID core.NodeID, meta PathMeta) (acceptedSession, error) {
+	caps := acc.Hello.Caps & a.cfg.Caps
+	if caps&crypto.CapMultipath != 0 {
+		s := newMPSession(a.cfg.Conn, Responder, acc.Hello.SessionID, peerID, acc.PeerKey, caps)
+		if _, err := s.addPath(conn, acc.Ciphers, meta); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+		return s, nil
+	}
 	rc, err := NewResumableConn(a.cfg.Conn)
 	if err != nil {
-		_ = fc.Close()
-		return err
+		_ = conn.Close()
+		return nil, err
 	}
-	if _, err := rc.AddPath(fc, meta); err != nil {
+	if _, err := rc.AddPath(frame.NewConn(conn, acc.Ciphers), meta); err != nil {
 		_ = rc.Close()
-		return err
+		return nil, err
 	}
-	s, err := newMuxSession(rc, Responder, acc.Hello.SessionID, peerID, acc.PeerKey, acc.Hello.Caps&a.cfg.Caps)
+	s, err := newMuxSession(rc, Responder, acc.Hello.SessionID, peerID, acc.PeerKey, caps)
 	if err != nil {
 		_ = rc.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (a *Acceptor) startSession(acc crypto.Accepted, conn transport.Conn, peerID core.NodeID, meta PathMeta) error {
+	s, err := a.newSession(acc, conn, peerID, meta)
+	if err != nil {
 		return err
 	}
+	id := s.ID()
 	a.mu.Lock()
-	if a.closed || a.sessions[s.id] != nil {
+	if a.closed || a.sessions[id] != nil {
 		a.mu.Unlock()
 		_ = s.Close()
 		return errors.New("session: duplicate session id or acceptor closed")
 	}
-	a.sessions[s.id] = s
+	a.sessions[id] = s
 	a.wg.Add(1)
 	a.mu.Unlock()
 	go func() {
 		defer a.wg.Done()
 		<-s.Done()
 		a.mu.Lock()
-		if a.sessions[s.id] == s {
-			delete(a.sessions, s.id)
+		if a.sessions[id] == s {
+			delete(a.sessions, id)
 		}
 		a.mu.Unlock()
 	}()
-	a.log.Info("inbound session", "peer", peerID, "via", meta)
+	a.log.Info("inbound session", "peer", peerID, "via", meta, "version", s.Version())
 	a.cfg.OnSession(s)
 	return nil
 }
 
 // Sessions returns the open inbound sessions.
-func (a *Acceptor) Sessions() []*MuxSession {
+func (a *Acceptor) Sessions() []PeerSession {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	out := make([]*MuxSession, 0, len(a.sessions))
+	out := make([]PeerSession, 0, len(a.sessions))
 	for _, s := range a.sessions {
 		out = append(out, s)
 	}
@@ -175,7 +193,7 @@ func (a *Acceptor) Sessions() []*MuxSession {
 func (a *Acceptor) Close() error {
 	a.mu.Lock()
 	a.closed = true
-	all := make([]*MuxSession, 0, len(a.sessions))
+	all := make([]acceptedSession, 0, len(a.sessions))
 	for _, s := range a.sessions {
 		all = append(all, s)
 	}

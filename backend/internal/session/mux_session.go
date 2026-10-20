@@ -52,7 +52,7 @@ type MuxSession struct {
 	wg        sync.WaitGroup
 }
 
-var _ Session = (*MuxSession)(nil)
+var _ acceptedSession = (*MuxSession)(nil)
 
 func newMuxSession(conn *ResumableConn, role Role, id crypto.SessionID, peer core.NodeID,
 	peerKey ed25519.PublicKey, caps uint32) (*MuxSession, error) {
@@ -96,6 +96,23 @@ func (s *MuxSession) Role() Role { return s.role }
 
 // Caps returns the negotiated capability bits.
 func (s *MuxSession) Caps() uint32 { return s.caps }
+
+// Version returns 1.
+func (s *MuxSession) Version() int { return 1 }
+
+// Tune implements PeerSession; v1 has a single active path and no FEC.
+func (s *MuxSession) Tune(Tuning) {}
+
+// addInbound implements acceptedSession.
+func (s *MuxSession) addInbound(conn transport.Conn, keys crypto.CipherPair, meta PathMeta) error {
+	_, err := s.conn.AddPath(frame.NewConn(conn, keys), meta)
+	return err
+}
+
+// revoke implements acceptedSession.
+func (s *MuxSession) revoke() {
+	s.conn.shutdown(errors.New("peer revoked"), frame.CloseRevoked, true)
+}
 
 // Started returns when the session was established.
 func (s *MuxSession) Started() time.Time { return s.started }
@@ -167,11 +184,11 @@ func (s *MuxSession) Join(ctx context.Context, conn transport.Conn, meta PathMet
 		flags |= crypto.FlagRotate
 	}
 	hello := crypto.Hello{Flags: flags, SessionID: s.id, NodeID: s.localID, Caps: s.caps}
-	fc, _, err := clientHandshake(ctx, conn, s.local, s.peerKey, hello)
+	keys, _, err := clientHandshake(ctx, conn, s.local, s.peerKey, hello)
 	if err != nil {
 		return fmt.Errorf("join %s: %w", meta, err)
 	}
-	id, err := s.conn.AddPath(fc, meta)
+	id, err := s.conn.AddPath(frame.NewConn(conn, keys), meta)
 	if err != nil {
 		return err
 	}
@@ -191,11 +208,18 @@ func (s *MuxSession) Close() error {
 	return nil
 }
 
+// rawStream is a stream of either session version.
+type rawStream interface {
+	io.ReadWriteCloser
+	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
+}
+
 // openedStream reads the receiver's reply byte before the first data.
-// It wraps rather than embeds *smux.Stream so that smux's WriteTo is not
+// It wraps rather than embeds the stream so that smux's WriteTo is not
 // promoted: io.Copy would use it and skip the reply byte.
 type openedStream struct {
-	st       *smux.Stream
+	st       rawStream
 	replied  bool
 	replyErr error
 }

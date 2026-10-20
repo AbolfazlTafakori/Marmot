@@ -49,6 +49,8 @@ describe('format', () => {
     expect(fEn.ms(4.25)).toBe('4.3 ms');
     expect(fEn.bits(2_500_000)).toBe('2.5 Mbit/s');
     expect(fFa.bits(2_500_000)).toBe('۲٫۵ مگابیت بر ثانیه');
+    expect(fEn.pct(2.5)).toBe('2.5%');
+    expect(fFa.pct(2.5)).toBe('۲٫۵٪');
   });
 
   it('fills placeholders', () => {

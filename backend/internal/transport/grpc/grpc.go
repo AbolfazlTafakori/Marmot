@@ -275,6 +275,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//nolint:staticcheck,gocritic // empty critical section: waiting for an in-flight Write
 	c.mu.Unlock()
 	w.Header().Set("Grpc-Status", "0")
+	// The response writer is gone once we return: a session still in its
+	// handshake must not set deadlines on it.
+	c.dmu.Lock()
+	c.ended = true
+	c.dmu.Unlock()
 }
 
 func localAddr(r *http.Request) net.Addr {
@@ -307,6 +312,8 @@ type conn struct {
 
 	local, remote net.Addr
 	deadline      func(t time.Time) error
+	dmu           sync.Mutex // guards ended against SetDeadline
+	ended         bool       // server side: the handler has returned
 }
 
 func (c *conn) Read(b []byte) (int, error) {
@@ -373,5 +380,13 @@ func (c *conn) Close() error {
 func (c *conn) LocalAddr() net.Addr  { return c.local }
 func (c *conn) RemoteAddr() net.Addr { return c.remote }
 
-// SetDeadline bounds the session handshake on the call.
-func (c *conn) SetDeadline(t time.Time) error { return c.deadline(t) }
+// SetDeadline bounds the session handshake on the call. After the
+// handler has returned (the client gave up) there is nothing to bound.
+func (c *conn) SetDeadline(t time.Time) error {
+	c.dmu.Lock()
+	defer c.dmu.Unlock()
+	if c.ended {
+		return net.ErrClosed
+	}
+	return c.deadline(t)
+}

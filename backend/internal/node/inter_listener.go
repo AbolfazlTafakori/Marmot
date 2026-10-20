@@ -88,9 +88,10 @@ func (il *interListener) close() {
 }
 
 // applyListeners makes the running inter-node listeners match c: unchanged
-// ones stay, removed ones close, new ones open. Transports this build does
-// not have are skipped with a warning, so a config written for a later
-// phase still runs.
+// ones stay, removed ones close, new ones open. A port_range listener of a
+// datagram transport (quic) binds every port of the range (ADR-0014 §3).
+// Transports this build does not have are skipped with a warning, so a
+// config written for a later phase still runs.
 func (n *Node) applyListeners(c *config.Config) error {
 	n.mu.RLock()
 	ctx, acc, current := n.ctx, n.acceptor, n.listeners
@@ -98,15 +99,24 @@ func (n *Node) applyListeners(c *config.Config) error {
 
 	want := map[string]config.TransportListen{}
 	for _, tl := range c.TransportListen {
-		if _, err := transport.Get(tl.Transport); err != nil {
+		tr, err := transport.Get(tl.Transport)
+		if err != nil {
 			n.log.Warn("transport not available in this build; listener skipped", "transport", tl.Transport)
 			continue
 		}
-		if tl.Port == 0 {
+		if tl.Port != 0 {
+			want[listenerKey(tl)] = tl
+			continue
+		}
+		if tr.Kind() != transport.Datagram {
 			n.log.Warn("port_range listeners need a datagram transport; listener skipped", "transport", tl.Transport)
 			continue
 		}
-		want[listenerKey(tl)] = tl
+		for p := uint32(tl.PortRange.Lo); p <= uint32(tl.PortRange.Hi); p++ {
+			one := tl
+			one.Port, one.PortRange = uint16(p), config.PortRange{}
+			want[listenerKey(one)] = one
+		}
 	}
 	next := map[string]*interListener{}
 	var stale []*interListener

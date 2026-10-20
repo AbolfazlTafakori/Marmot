@@ -162,6 +162,9 @@ func (c *Config) validateLocal(is *issues) {
 
 func (c *Config) validateSession(is *issues) {
 	s := &c.Session
+	if s.Version != 1 && s.Version != 2 {
+		is.errf("session.version", "must be 1 or 2")
+	}
 	if s.StandbyPaths < 0 || s.StandbyPaths > 8 {
 		is.errf("session.standby_paths", "must be 0..8")
 	}
@@ -194,6 +197,10 @@ func (c *Config) validateSession(is *issues) {
 	}
 }
 
+// MaxListenPorts bounds a port_range listener: the node binds every port
+// of it (ADR-0014 §3).
+const MaxListenPorts = 256
+
 func (c *Config) validateTransportListen(is *issues, user map[uint16]bool) {
 	used := make(map[uint16]string)
 	for i, l := range c.TransportListen {
@@ -208,6 +215,10 @@ func (c *Config) validateTransportListen(is *issues, user map[uint16]bool) {
 		lo, hi := l.Port, l.Port
 		if !l.PortRange.IsZero() {
 			lo, hi = l.PortRange.Lo, l.PortRange.Hi
+			if int(hi)-int(lo)+1 > MaxListenPorts {
+				is.errf(path+".port_range", "spans more than %d ports; the node binds each one", MaxListenPorts)
+				continue
+			}
 		}
 		for p := uint32(lo); p <= uint32(hi); p++ {
 			port := uint16(p)

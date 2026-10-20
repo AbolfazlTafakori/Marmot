@@ -91,3 +91,19 @@ To serve the panel, copy `frontend/dist` to `/usr/share/marmot/web` and set
 A config that fails validation is never applied: the running one stays.
 Ports that cannot be bound (held by another process) are reported with the
 owning process, and everything else is applied.
+
+## Inter-node ports and firewalls
+
+Every `[[transport_listen]]` port must be reachable from the peers that dial
+it: TCP for `tcp`, `tls`, `ws` and `grpc`, **UDP** for `quic`. A `quic`
+listener with `port_range` binds every port of the range (at most 256).
+QUIC paths carry their records in UDP datagrams, where FEC repairs loss
+([ADR-0014](adr/0014-quic-datagram-paths-fec.md)); a firewall that allows
+only TCP leaves those paths dead, and the node falls back to the TCP-based
+ones. Marmot itself never changes firewall rules (ARCHITECTURE §1).
+
+The kernel's UDP buffers limit QUIC throughput. On busy nodes raise them:
+
+```sh
+sysctl -w net.core.rmem_max=7500000 net.core.wmem_max=7500000
+```

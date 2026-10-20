@@ -55,7 +55,7 @@ func (c *streamConn) SetDeadline(t time.Time) error {
 
 // directSession returns a live, ready session to id whose active path is
 // direct: the outbound one if it qualifies, else the newest inbound one.
-func (n *Node) directSession(id core.NodeID) *session.MuxSession {
+func (n *Node) directSession(id core.NodeID) session.PeerSession {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	if !n.running {
@@ -66,7 +66,7 @@ func (n *Node) directSession(id core.NodeID) *session.MuxSession {
 			return s
 		}
 	}
-	var best *session.MuxSession
+	var best session.PeerSession
 	for _, s := range n.acceptor.Sessions() {
 		if s.Peer() == id && directReady(s) && (best == nil || s.Started().After(best.Started())) {
 			best = s
@@ -76,7 +76,7 @@ func (n *Node) directSession(id core.NodeID) *session.MuxSession {
 }
 
 // directReady reports whether s is live, ready and runs on a direct path.
-func directReady(s *session.MuxSession) bool {
+func directReady(s session.PeerSession) bool {
 	if !live(s) {
 		return false
 	}
@@ -130,7 +130,7 @@ func (n *Node) dialRelay(ctx context.Context, via, target core.NodeID) (transpor
 }
 
 // openPath opens a path stream with route on s and waits for its answer.
-func openPath(ctx context.Context, s *session.MuxSession, route []core.NodeID, local, remote relayAddr) (transport.Conn, error) {
+func openPath(ctx context.Context, s session.PeerSession, route []core.NodeID, local, remote relayAddr) (transport.Conn, error) {
 	st, err := s.OpenStream(ctx, frame.StreamHeader{Path: true, Route: route})
 	if err != nil {
 		return nil, err
@@ -149,7 +149,7 @@ func openPath(ctx context.Context, s *session.MuxSession, route []core.NodeID, l
 // servePath handles a path stream that arrived on s: as its last hop it
 // hands the stream to the session acceptor; otherwise it relays it to the
 // next hop if this node allows transit.
-func (n *Node) servePath(ctx context.Context, s *session.MuxSession, st session.Stream, h frame.StreamHeader) {
+func (n *Node) servePath(ctx context.Context, s session.PeerSession, st session.Stream, h frame.StreamHeader) {
 	from := s.Peer()
 	if len(h.Route) == 0 {
 		if _, err := st.Write([]byte{frame.ReplyOK}); err != nil {
@@ -195,7 +195,7 @@ func (n *Node) servePath(ctx context.Context, s *session.MuxSession, st session.
 
 // transitCheck decides whether a path stream from may be relayed along
 // route, and returns the session to its next hop.
-func (n *Node) transitCheck(from core.NodeID, route []core.NodeID) (byte, *session.MuxSession) {
+func (n *Node) transitCheck(from core.NodeID, route []core.NodeID) (byte, session.PeerSession) {
 	cfg := n.Config()
 	self := core.NodeID(cfg.Node.ID)
 	switch {

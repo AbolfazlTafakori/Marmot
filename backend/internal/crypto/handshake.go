@@ -36,6 +36,9 @@ var suite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.Ha
 type CipherPair struct {
 	Send *noise.CipherState
 	Recv *noise.CipherState
+	// Binding is the handshake hash. Both sides of a path hold the same
+	// value and no one else can produce it; session v2 names paths by it.
+	Binding [32]byte
 }
 
 // Initiate performs the initiator side of Noise IK over rw. The caller is
@@ -90,7 +93,7 @@ func Initiate(rw io.ReadWriter, local *Identity, peer ed25519.PublicKey, hello H
 	if w.Status != StatusOK {
 		return CipherPair{}, w, fmt.Errorf("%w (status %d)", ErrRejected, w.Status)
 	}
-	return CipherPair{Send: cs1, Recv: cs2}, w, nil
+	return CipherPair{Send: cs1, Recv: cs2, Binding: [32]byte(hs.ChannelBinding())}, w, nil
 }
 
 // Accepted is the result of a successful responder handshake.
@@ -168,7 +171,8 @@ func (r *Responder) Respond(rw io.ReadWriter, decide func(peer ed25519.PublicKey
 	if cs1 == nil || cs2 == nil {
 		return Accepted{}, errNoCipherPair
 	}
-	return Accepted{PeerKey: peerKey, Hello: h, Ciphers: CipherPair{Send: cs2, Recv: cs1}}, nil
+	return Accepted{PeerKey: peerKey, Hello: h,
+		Ciphers: CipherPair{Send: cs2, Recv: cs1, Binding: [32]byte(hs.ChannelBinding())}}, nil
 }
 
 func writeMsg(w io.Writer, msg []byte) error {

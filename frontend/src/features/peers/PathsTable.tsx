@@ -3,7 +3,7 @@ import { api, call } from '@/shared/api/client';
 import { useI18n } from '@/shared/i18n/useI18n';
 import { Badge, ErrorMessage, Loading, Ltr, Td, Table } from '@/shared/ui';
 
-/** Live paths to one peer: role, route, RTT and average throughput. */
+/** Live paths to one peer: role, route, RTT, jitter, loss and average throughput. */
 export function PathsTable({ peerId }: { peerId: string }) {
   const { m, f } = useI18n();
   const q = useQuery({
@@ -15,7 +15,16 @@ export function PathsTable({ peerId }: { peerId: string }) {
   if (!q.data) return <Loading />;
   return (
     <Table
-      head={['', m.peers.transport, m.peers.local, m.peers.remote, m.status.rtt, m.peers.throughput]}
+      head={[
+        '',
+        m.peers.transport,
+        m.peers.local,
+        m.peers.remote,
+        m.status.rtt,
+        m.peers.jitter,
+        m.peers.loss,
+        m.peers.throughput,
+      ]}
       empty={q.data.length === 0}
     >
       {q.data.map((p) => (
@@ -33,6 +42,8 @@ export function PathsTable({ peerId }: { peerId: string }) {
             <Ltr>{p.remote}</Ltr>
           </Td>
           <Td>{p.rttMs ? f.ms(p.rttMs) : '–'}</Td>
+          <Td>{p.rttMs ? f.ms(p.jitterMs) : '–'}</Td>
+          <Td>{f.pct(p.lossPct)}</Td>
           <Td>{f.bits(p.throughputBps)}</Td>
         </tr>
       ))}

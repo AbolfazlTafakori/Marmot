@@ -14,6 +14,7 @@ import (
 
 	"marmot/internal/transport"
 	_ "marmot/internal/transport/grpc"
+	_ "marmot/internal/transport/quic"
 	_ "marmot/internal/transport/tcp"
 	_ "marmot/internal/transport/tls"
 	_ "marmot/internal/transport/ws"
@@ -24,7 +25,7 @@ func TestRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := transport.Names()
-	if strings.Join(names, ",") != "grpc,tcp,tls,ws" {
+	if strings.Join(names, ",") != "grpc,quic,tcp,tls,ws" {
 		t.Fatalf("names = %v", names)
 	}
 	if _, err := transport.Get("carrier-pigeon"); !errors.Is(err, transport.ErrUnknown) {
@@ -47,6 +48,8 @@ func TestRoundTrip(t *testing.T) {
 		{"grpc", map[string]any{"service": "pkg.Svc", "sni": "example.com"}},
 		{"grpc", map[string]any{"tls": false}},
 		{"grpc", map[string]any{"fingerprint": "safari"}},
+		{"quic", nil},
+		{"quic", map[string]any{"sni": "example.com", "alpn": "doq", "datagrams": false}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { roundTrip(t, c.name, c.opts) })

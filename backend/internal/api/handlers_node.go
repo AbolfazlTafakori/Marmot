@@ -36,7 +36,8 @@ func statusView(st node.Status, now time.Time) nodeStatusView {
 	for _, p := range st.Peers {
 		v.BytesIn += p.BytesRecv
 		v.BytesOut += p.BytesSent
-		for _, ss := range p.Sessions {
+		for i := range p.Sessions {
+			ss := &p.Sessions[i]
 			v.Sessions++
 			v.Streams += ss.Streams
 		}
@@ -45,11 +46,12 @@ func statusView(st node.Status, now time.Time) nodeStatusView {
 	return v
 }
 
-// healthOf summarises a peer: its state, its active paths and the RTT of
-// the active path of its first ready session.
+// healthOf summarises a peer: its state, its active paths, and the RTT
+// and loss of the active path of its first ready session.
 func healthOf(p node.PeerStatus) peerHealthView {
 	h := peerHealthView{ID: string(p.ID), State: p.State}
-	for _, ss := range p.Sessions {
+	for j := range p.Sessions {
+		ss := &p.Sessions[j]
 		for i := range ss.Paths {
 			pi := &ss.Paths[i]
 			if !pi.Active {
@@ -58,10 +60,20 @@ func healthOf(p node.PeerStatus) peerHealthView {
 			h.ActivePaths++
 			if h.RTTMs == 0 && ss.Ready {
 				h.RTTMs = float64(pi.RTT.Microseconds()) / 1000
+				h.LossPct = lossOf(pi) * 100
 			}
 		}
 	}
 	return h
+}
+
+// lossOf is the controller's loss for the path, or the session's own
+// count before the controller has rated it.
+func lossOf(pi *sessionPath) float64 {
+	if pi.Scored {
+		return pi.Loss
+	}
+	return pi.PathInfo.Loss
 }
 
 func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request, a *authCtx) {
@@ -83,7 +95,8 @@ func (s *Server) handlePeerPaths(w http.ResponseWriter, r *http.Request, a *auth
 			continue
 		}
 		out := []pathView{}
-		for _, ss := range p.Sessions {
+		for j := range p.Sessions {
+			ss := &p.Sessions[j]
 			for i := range ss.Paths {
 				out = append(out, pathViewOf(ss.ID, &ss.Paths[i], s.now()))
 			}
@@ -94,20 +107,28 @@ func (s *Server) handlePeerPaths(w http.ResponseWriter, r *http.Request, a *auth
 	writeError(w, http.StatusNotFound, "not_found", "no such peer")
 }
 
-// pathViewOf reports one path. Score and throughput are Phase 1
-// stand-ins until the adaptive controller (ADR-0009).
+// pathViewOf reports one path. Score maps the controller's score (lower
+// is better, about milliseconds) to 0..1, higher better (ADR-0015); a v1
+// path or one not rated yet gets an RTT-based estimate. Throughput is the
+// average since the path came up.
 func pathViewOf(sessionID string, pi *sessionPath, now time.Time) pathView {
 	rttMs := float64(pi.RTT.Microseconds()) / 1000
 	v := pathView{
 		ID: fmt.Sprintf("%s/%d", sessionID, pi.ID), Local: pi.Meta.Local, Remote: pi.Meta.Remote,
 		Transport: pi.Meta.Transport, Role: "standby", RTTMs: rttMs,
+		JitterMs: float64(pi.RTTVar.Microseconds()) / 1000, LossPct: lossOf(pi) * 100,
 	}
 	if age := now.Sub(pi.Registered).Seconds(); age > 0 {
 		v.ThroughputBps = int64(float64(pi.BytesSent+pi.BytesRecv) * 8 / age)
 	}
+	if pi.Active {
+		v.Role = "active"
+	}
 	switch {
+	case pi.Scored:
+		v.Score = 1 / (1 + pi.Score/100)
 	case pi.Active:
-		v.Role, v.Score = "active", 1
+		v.Score = 1
 	case rttMs > 0:
 		v.Score = 1 / (1 + rttMs/100)
 	}

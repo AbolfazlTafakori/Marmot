@@ -75,7 +75,7 @@ plaintext  = type:u8 | pad_len:u16 | body | padding[pad_len]
 - Any decryption failure closes the **path** (not the session).
 
 ### 4.2 Datagram transports
-One record per datagram, without the `length` prefix. Nonce is explicit: `nonce:u64 | ciphertext`, with a 1024-entry sliding replay window. (Used by v2; v1 runs on stream transports and QUIC streams only.)
+One record per datagram, without the `length` prefix. Nonce is explicit: `nonce:u64 | ciphertext`, with a 1024-entry sliding replay window. The sender counts nonces up from 0 per path and direction; the receiver drops a record whose nonce is older than the window or already seen. The plaintext is laid out as in §4.1. (Used by v2 on QUIC datagram paths, [ADR-0014](../adr/0014-quic-datagram-paths-fec.md); v1 runs on stream transports and QUIC streams only.)
 
 ### 4.3 Record types
 | Type | Name | Body |
@@ -88,7 +88,8 @@ One record per datagram, without the `length` prefix. Nonce is explicit: `nonce:
 | 0x06 | ROTATE | `new_session_epoch:u32` — make-before-break notice |
 | 0x07 | CLOSE | `code:u16 | reason_len:u8 | reason` |
 | 0x08–0x7F | reserved | |
-| 0x80–0xFF | v2 multipath frames | defined in a later revision |
+| 0x80–0x82 | v2 packets | §11 |
+| 0x83–0xFF | reserved | |
 
 Unknown types in the reserved range close the path with code `PROTOCOL_ERROR`.
 
@@ -181,5 +182,51 @@ A node that receives a path stream with `route_len > 0` checks its transit polic
 
 ## 10. Notes
 
-- `skip_double_encryption` cannot be applied per stream in v1 (smux interleaves streams inside one record stream). It becomes effective in v2, where records are per stream. In v1 the flag is accepted and ignored with a warning.
+- `skip_double_encryption` cannot be applied per stream: v1 interleaves streams in one record stream and v2 packs frames of several streams in one packet. The flag is accepted and ignored with a warning (Phase 4, [ADR-0013](../adr/0013-session-v2-multipath.md)).
 - All parsers in this spec must have fuzz tests (`CONTRIBUTING` §6).
+
+---
+
+## 11. Session v2 ([ADR-0013](../adr/0013-session-v2-multipath.md))
+
+Used when both sides keep capability bit 3 in the handshake. smux and the resumable conn (§5) are not used; ACTIVATE, ROTATE, DATA, ACK, PING and PONG records (§4.3) are not sent and close the path if received.
+
+### 11.1 Paths
+Every path of the session is used. A path's **id** is the first 8 bytes (big-endian `u64`) of the Noise handshake hash of that path; both sides compute it. A join whose id equals that of a live path is rejected. Each path has its own packet number space starting at 0.
+
+### 11.2 Records
+| Type | Name | Body |
+|---|---|---|
+| 0x07 | CLOSE | as §4.3. Code `3` (rotate complete) closes only this path; any other code closes the session |
+| 0x80 | PKT | `pn:u64 | frame*` |
+| 0x81 | REPAIR | `pn:u64 | group:u32 | k:u8 | m:u8 | index:u8 | parity` (FEC, §11.5) |
+| 0x82 | PKT_FEC | `pn:u64 | group:u32 | index:u8 | frame*` (FEC source packet, §11.5) |
+
+A packet is **ack-eliciting** if it holds any frame but ACK. REPAIR packets are numbered and acknowledged like others but never resent.
+
+### 11.3 Frames
+`v` is an unsigned LEB128 varint (Go `binary.AppendUvarint`), at most 10 bytes.
+
+| Type | Name | Fields |
+|---|---|---|
+| 0x01 | PING | — (asks for an ACK) |
+| 0x02 | ACK | `largest:v | delay_us:v | count:v | first:v | (gap:v | len:v)×count` |
+| 0x03 | STREAM | `sid:v | off:v | fin:u8 | len:v | data[len]` |
+| 0x04 | RESET | `sid:v | code:v | final:v` — the sender abandons its direction of the stream; `final` is how many bytes it sent |
+| 0x05 | STOP | `sid:v` — the sender will read no more; the peer answers with RESET unless its FIN was already acknowledged |
+| 0x06 | MAX_STREAM_DATA | `sid:v | max:v` — the peer may send stream bytes below `max` |
+| 0x07 | MAX_DATA | `max:v` — the same for the sum over all streams |
+
+- **ACK** acknowledges packets of the path it arrives on. The first range is `[largest − first, largest]`; each further range ends `gap + 2` below the previous range's smallest number and spans `len + 1` numbers (as QUIC). At most 32 ranges. `delay_us` is how long the receiver held the ACK.
+- **STREAM**: the initiator opens odd stream ids, the responder even ones; the first frame of an unknown id from the peer opens a stream. `fin = 1` marks `off + len` as the final size. The stream carries the header and reply byte of §6.
+- A stream is gone once both directions ended: FIN acknowledged or RESET acknowledged when sending; FIN reached or RESET received when receiving. Bytes up to a direction's final size count against the session window even if they are discarded, so a closed stream never leaks window.
+- `Close` sends FIN after the data already written and STOP if the peer's direction has not ended. Aborting a stream sends RESET and STOP.
+- Initial windows: 2 MiB per stream, 16 MiB per session. Receiving bytes beyond a window, a stream id of the wrong parity, or a final size that changes closes the session with code `1`.
+
+### 11.4 Loss and acknowledgement
+- The receiver acknowledges every second ack-eliciting packet, any packet received out of order, and otherwise within 25 ms.
+- A packet is lost when a packet at least 3 numbers higher was acknowledged, or when it was sent more than 9/8 × max(smoothed RTT, latest RTT) before an acknowledged one. Its frames are sent again, preferably on another path; STREAM data already acknowledged is not resent.
+- Probe timeout = smoothed RTT + max(4 × RTT variance, 1 ms) + 25 ms, doubled on each consecutive expiry. On expiry the path sends a PING, its unacknowledged frames are queued for other paths, and it takes no new data until something is acknowledged.
+
+### 11.5 FEC ([ADR-0014](../adr/0014-quic-datagram-paths-fec.md))
+On datagram paths only. A source packet is sent as PKT_FEC; its **symbol** is `path_id:u64 | pn:u64 | len:u16 | frames[len]`, zero-padded to the longest symbol of its group. `group` counts up per session and direction; `index` is `0..k−1` for sources and `k..k+m−1` for REPAIR, whose `parity` is the Reed-Solomon parity shard (`klauspost/reedsolomon`, `k` data and `m` parity shards) over the padded symbols. A receiver holding any `k` shards of a group rebuilds the missing sources and processes each as if it had arrived on path `path_id` with number `pn`. Groups older than 1 s are dropped.
