@@ -22,6 +22,12 @@ func (f *Forwarder) serveUDP(ctx context.Context, p *Policy, st session.Stream, 
 		f.refuse(st, frame.ReplyUnreachable)
 		return
 	}
+	f.pumpUDP(p, st, c)
+}
+
+// pumpUDP confirms the stream and moves datagrams between st (framed) and
+// c until either side ends or the flow is idle for the policy's timeout.
+func (f *Forwarder) pumpUDP(p *Policy, st session.Stream, c net.Conn) {
 	if _, err := st.Write([]byte{frame.ReplyOK}); err != nil {
 		_ = c.Close()
 		_ = st.Close()

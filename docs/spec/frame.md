@@ -127,6 +127,17 @@ Receiver replies with one byte: `0` OK, `1` target refused, `2` target unreachab
 ### 6.1 UDP inside a stream
 Each datagram is framed as `len:u16 | payload`. One stream per `(client_addr, target_port)` flow, closed after `udp_idle_timeout` (default 60 s).
 
+### 6.2 Exit streams (version 2)
+A stream opened by the exit-mode SOCKS5 inbound names its destination ([ADR-0010](../adr/0010-exit-stream-destination.md)). Its header has `version = 2` and, after the version 1 fields, adds:
+
+| Field | Size | Notes |
+|---|---|---|
+| dst_type | 1 | `1` IPv4, `3` domain name, `4` IPv6 |
+| dst_addr | 4 / 16 / 1+n | IPv4, IPv6, or `len:u8 | name` (1..255 bytes, no control characters) |
+| dst_port | 2 | |
+
+`target_port` repeats `dst_port`. A header without a destination is always sent as version 1. The receiving node delivers a version 2 stream only if its role is `exit` or `hybrid`, and refuses (`3` policy denied) destinations in loopback, private, link-local, CGNAT, unspecified, multicast or broadcast ranges and the node's own interface addresses, checking every resolved address of a domain name at dial time.
+
 ---
 
 ## 7. Relay

@@ -31,9 +31,15 @@ type Policy struct {
 	// ProxyV2Ports limits PROXY v2 to these target ports; empty = all.
 	ProxyV2Ports map[uint16]bool
 	// DeniedPorts may never be targeted by a peer: SSH and the panel API.
-	DeniedPorts    map[uint16]bool
-	AllowUDP       bool
-	UDPIdleTimeout time.Duration
+	DeniedPorts map[uint16]bool
+	AllowUDP    bool
+	// AllowExit lets peers send exit streams through this node (role exit
+	// or hybrid, ADR-0010).
+	AllowExit bool
+	// AllowDestination decides which addresses an exit may connect to;
+	// nil means the ADR-0010 rule (no private, local or own addresses).
+	AllowDestination func(netip.Addr) bool
+	UDPIdleTimeout   time.Duration
 }
 
 func (p *Policy) validate() error {
@@ -102,6 +108,10 @@ func (f *Forwarder) Serve(ctx context.Context, st session.Stream, h frame.Stream
 		f.refuse(st, code)
 		return
 	}
+	if !h.Dest.IsZero() {
+		f.serveExit(ctx, p, st, h)
+		return
+	}
 	target := net.JoinHostPort(p.TargetHost, strconv.Itoa(int(h.TargetPort)))
 	switch h.Proto {
 	case core.ProtoTCP:
@@ -117,7 +127,7 @@ func (f *Forwarder) check(p *Policy, h frame.StreamHeader) byte {
 		// Relay transit arrives with session routing in Phase 2.
 		f.log.Warn("relay route requested but transit is not available", "route", h.Route)
 		return frame.ReplyDenied
-	case p.DeniedPorts[h.TargetPort]:
+	case h.Dest.IsZero() && p.DeniedPorts[h.TargetPort]:
 		f.log.Warn("stream to a protected port denied", "port", h.TargetPort)
 		return frame.ReplyDenied
 	case h.Proto == core.ProtoUDP && !p.AllowUDP:

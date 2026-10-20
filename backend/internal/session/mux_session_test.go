@@ -226,3 +226,52 @@ func TestPeerKeysRejectsSharedKey(t *testing.T) {
 		t.Fatal("shared key accepted")
 	}
 }
+
+func TestAwaitReply(t *testing.T) {
+	ts := startServer(t, map[core.NodeID]ed25519.PublicKey{"a": idA.PublicKey()})
+	a, err := ts.dial(t, idA, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b := ts.next(t)
+	go func() {
+		for {
+			st, h, err := b.AcceptStream(context.Background())
+			if err != nil {
+				return
+			}
+			if h.TargetPort == 9 {
+				_, _ = st.Write([]byte{frame.ReplyDenied})
+				_ = st.Close()
+				continue
+			}
+			_, _ = st.Write([]byte{frame.ReplyOK})
+			_, _ = st.Write([]byte("welcome"))
+		}
+	}()
+	type awaiter interface{ AwaitReply(context.Context) error }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	denied := testHeader
+	denied.TargetPort = 9
+	st, _ := a.OpenStream(ctx, denied)
+	err = st.(awaiter).AwaitReply(ctx)
+	var re *ReplyError
+	if !errors.As(err, &re) || re.Code != frame.ReplyDenied {
+		t.Fatalf("await refused: %v", err)
+	}
+	if _, err := st.Read(make([]byte, 1)); !errors.As(err, &re) {
+		t.Fatalf("read after refusal: %v", err)
+	}
+
+	st, _ = a.OpenStream(ctx, testHeader)
+	if err := st.(awaiter).AwaitReply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 7)
+	if _, err := io.ReadFull(st, got); err != nil || string(got) != "welcome" {
+		t.Fatalf("data after reply %q %v", got, err)
+	}
+}

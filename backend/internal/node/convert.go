@@ -32,13 +32,15 @@ func steeringRules(c *config.Config) []steering.Rule {
 	return out
 }
 
-func forwarderPolicy(c *config.Config) forwarder.Policy {
+func (n *Node) forwarderPolicy(c *config.Config) forwarder.Policy {
 	p := forwarder.Policy{
-		TargetHost:     c.PanelIntegration.TargetHost,
-		ProxyV2:        c.PanelIntegration.PreserveClientIP == "proxy_v2",
-		DeniedPorts:    map[uint16]bool{},
-		AllowUDP:       true,
-		UDPIdleTimeout: c.Session.UDPIdleTimeout.D(),
+		AllowDestination: n.exitDestinations,
+		TargetHost:       c.PanelIntegration.TargetHost,
+		ProxyV2:          c.PanelIntegration.PreserveClientIP == "proxy_v2",
+		DeniedPorts:      map[uint16]bool{},
+		AllowUDP:         true,
+		AllowExit:        c.Node.Role == "exit" || c.Node.Role == "hybrid",
+		UDPIdleTimeout:   c.Session.UDPIdleTimeout.D(),
 	}
 	if len(c.PanelIntegration.ProxyV2Ports) > 0 {
 		p.ProxyV2Ports = map[uint16]bool{}

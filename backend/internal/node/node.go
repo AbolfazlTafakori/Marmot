@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"marmot/internal/crypto"
 	"marmot/internal/forwarder"
 	"marmot/internal/session"
+	"marmot/internal/socks5"
 	"marmot/internal/steering"
 )
 
@@ -30,14 +32,20 @@ var (
 type Options struct {
 	Version string
 	Logger  *slog.Logger
+
+	// exitDestinations overrides the exit destination rule; only this
+	// package's tests set it, since every address on a test host is local.
+	exitDestinations func(netip.Addr) bool
 }
 
 // Node is one running Marmot instance.
 type Node struct {
 	identity *crypto.Identity
 	version  string
-	log      *slog.Logger
-	events   *eventBus
+	// exitDestinations: see Options; nil means the ADR-0010 rule.
+	exitDestinations func(netip.Addr) bool
+	log              *slog.Logger
+	events           *eventBus
 
 	lifecycle sync.Mutex // serialises Start, Reload and Stop
 
@@ -51,6 +59,7 @@ type Node struct {
 	acceptor  *session.Acceptor
 	forwarder *forwarder.Forwarder
 	steering  *steering.Steering
+	socks     *socks5.Server // exit-mode inbound; nil when disabled
 
 	ctx    context.Context // cancelled by Stop; parent of stream serving
 	cancel context.CancelFunc
@@ -75,7 +84,8 @@ func New(cfg *config.Config, identity *crypto.Identity, opts Options) (*Node, er
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Node{identity: identity, version: opts.Version, log: log, events: newEventBus(), cfg: cfg,
-		closed: map[core.NodeID]byteTotals{}}, nil
+		exitDestinations: opts.exitDestinations,
+		closed:           map[core.NodeID]byteTotals{}}, nil
 }
 
 // PublicKey returns this node's identity key.
@@ -111,7 +121,7 @@ func (n *Node) Start() error {
 	if err != nil {
 		return err
 	}
-	fwd, err := forwarder.New(forwarderPolicy(cfg), n.log.With("component", "forwarder"))
+	fwd, err := forwarder.New(n.forwarderPolicy(cfg), n.log.With("component", "forwarder"))
 	if err != nil {
 		return err
 	}
@@ -144,6 +154,9 @@ func (n *Node) Start() error {
 	errs := []error{n.applyListeners(cfg)}
 	n.applyLinks(nil, cfg)
 	if err := st.Update(steeringRules(cfg)); err != nil {
+		errs = append(errs, err)
+	}
+	if err := n.applySOCKS5(nil, cfg); err != nil {
 		errs = append(errs, err)
 	}
 	if err := errors.Join(errs...); err != nil {
@@ -179,6 +192,13 @@ func (n *Node) stopLocked() {
 	n.mu.Unlock()
 
 	_ = n.steering.Close()
+	n.mu.Lock()
+	socks := n.socks
+	n.socks = nil
+	n.mu.Unlock()
+	if socks != nil {
+		_ = socks.Close()
+	}
 	for _, l := range listeners {
 		l.close()
 	}

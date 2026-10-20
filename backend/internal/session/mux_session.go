@@ -195,8 +195,9 @@ func (s *MuxSession) Close() error {
 // It wraps rather than embeds *smux.Stream so that smux's WriteTo is not
 // promoted: io.Copy would use it and skip the reply byte.
 type openedStream struct {
-	st      *smux.Stream
-	replied bool
+	st       *smux.Stream
+	replied  bool
+	replyErr error
 }
 
 func (s *openedStream) Write(b []byte) (int, error)        { return s.st.Write(b) }
@@ -221,17 +222,39 @@ func (e *ReplyError) Error() string {
 }
 
 func (s *openedStream) Read(b []byte) (int, error) {
-	if !s.replied {
-		var r [1]byte
-		if _, err := io.ReadFull(s.st, r[:]); err != nil {
-			return 0, err
-		}
-		s.replied = true
-		if r[0] != frame.ReplyOK {
-			return 0, &ReplyError{Code: r[0]}
-		}
+	if err := s.readReply(); err != nil {
+		return 0, err
 	}
 	return s.st.Read(b)
+}
+
+// readReply consumes the receiver's reply byte once; a refusal is kept
+// and returned by every later Read.
+func (s *openedStream) readReply() error {
+	if s.replied {
+		return s.replyErr
+	}
+	var r [1]byte
+	if _, err := io.ReadFull(s.st, r[:]); err != nil {
+		return err
+	}
+	s.replied = true
+	if r[0] != frame.ReplyOK {
+		s.replyErr = &ReplyError{Code: r[0]}
+	}
+	return s.replyErr
+}
+
+// AwaitReply waits for the receiver's answer before any data, for callers
+// that must know the outcome first (the SOCKS5 inbound replies to its
+// client only after the far side has connected). It must not run
+// concurrently with Read.
+func (s *openedStream) AwaitReply(ctx context.Context) error {
+	if d, ok := ctx.Deadline(); ok {
+		_ = s.st.SetReadDeadline(d)
+		defer func() { _ = s.st.SetReadDeadline(time.Time{}) }()
+	}
+	return s.readReply()
 }
 
 // IsReplyError reports whether err is a refusal by the receiving node.

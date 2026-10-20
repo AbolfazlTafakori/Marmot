@@ -129,8 +129,12 @@ func (c *Config) validatePanel(is *issues) {
 		is.errf("panel_integration.target_host", "invalid host %q", p.TargetHost)
 	}
 	if c.SOCKS5.Enabled {
-		if _, err := netip.ParseAddrPort(c.SOCKS5.Listen); err != nil {
+		ap, err := netip.ParseAddrPort(c.SOCKS5.Listen)
+		switch {
+		case err != nil:
 			is.errf("socks5.listen", "%v", err)
+		case !ap.Addr().IsLoopback():
+			is.warnf("socks5.listen", "not a loopback address: anyone who can reach %s can send traffic out through the exit; keep it on a private network", ap)
 		}
 	}
 	if c.Node.Role == "exit" && !c.SOCKS5.Enabled {

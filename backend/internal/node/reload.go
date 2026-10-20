@@ -37,7 +37,7 @@ func (n *Node) Reload(next *config.Config) error {
 	}
 
 	n.acceptor.SetPeers(keys)
-	if err := n.forwarder.SetPolicy(forwarderPolicy(next)); err != nil {
+	if err := n.forwarder.SetPolicy(n.forwarderPolicy(next)); err != nil {
 		return err
 	}
 	n.mu.Lock()
@@ -47,7 +47,7 @@ func (n *Node) Reload(next *config.Config) error {
 
 	errs := []error{n.applyListeners(next)}
 	n.applyLinks(prev, next)
-	errs = append(errs, n.steering.Update(steeringRules(next)))
+	errs = append(errs, n.steering.Update(steeringRules(next)), n.applySOCKS5(prev, next))
 
 	err = errors.Join(errs...)
 	data := map[string]any{"ok": err == nil}
