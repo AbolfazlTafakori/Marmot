@@ -73,7 +73,8 @@ func (n *Node) applyLinks(prev, next *config.Config) {
 	fresh := make(map[core.NodeID]*peerLink, len(next.Peers))
 	var stale []*peerLink
 	keys, _ := peerKeys(next) // validated by the caller
-	for _, p := range next.Peers {
+	for i := range next.Peers {
+		p := next.Peers[i]
 		id := core.NodeID(p.ID)
 		if l := current[id]; l != nil && !depsChanged && reflect.DeepEqual(l.cfg, p) {
 			fresh[id] = l

@@ -98,6 +98,7 @@ type peerView struct {
 	PublicKey  string          `json:"publicKey"`
 	Weight     int             `json:"weight,omitempty"`
 	IPv4Pool   []string        `json:"ipv4Pool,omitempty"`
+	IPv6Pool   []string        `json:"ipv6Pool,omitempty"`
 	IPv6Subnet string          `json:"ipv6Subnet,omitempty"`
 	Endpoints  []endpointView  `json:"endpoints"`
 	Health     *peerHealthView `json:"health,omitempty"`

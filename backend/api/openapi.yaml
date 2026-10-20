@@ -550,6 +550,7 @@ components:
         publicKey: { type: string }
         weight: { type: integer, minimum: 1, maximum: 100, default: 1 }
         ipv4Pool: { type: array, items: { type: string, format: ipv4 } }
+        ipv6Pool: { type: array, items: { type: string, format: ipv6 } }
         ipv6Subnet: { type: string }
         endpoints:
           type: array

@@ -78,8 +78,8 @@ func (c *Config) validateSteering(is *issues) map[uint16]bool {
 		validateProtocols(is, path, protos)
 	}
 	peerIDs := make(map[string]bool, len(c.Peers))
-	for _, p := range c.Peers {
-		peerIDs[p.ID] = true
+	for i := range c.Peers {
+		peerIDs[c.Peers[i].ID] = true
 	}
 	for k, ids := range s.PortPeers {
 		path := "steering.port_peers." + k
@@ -144,6 +144,7 @@ func (c *Config) validatePanel(is *issues) {
 
 func (c *Config) validateLocal(is *issues) {
 	validatePool(is, "local.ipv4_pool", c.Local.IPv4Pool)
+	validatePool6(is, "local.ipv6_pool", c.Local.IPv6Pool)
 	validateSubnet(is, "local.ipv6_subnet", c.Local.IPv6Subnet)
 	r := c.Local.IPv6Rotation
 	if r.Enabled {
@@ -223,7 +224,8 @@ func (c *Config) validateTransportListen(is *issues, user map[uint16]bool) {
 
 func (c *Config) validatePeers(is *issues) {
 	seen := make(map[string]bool)
-	for i, p := range c.Peers {
+	for i := range c.Peers {
+		p := &c.Peers[i]
 		path := fmt.Sprintf("peers[%d]", i)
 		if _, err := core.ParseNodeID(p.ID); err != nil {
 			is.errf(path+".id", "%v", err)
@@ -242,9 +244,10 @@ func (c *Config) validatePeers(is *issues) {
 			is.errf(path+".weight", "must be 1..100")
 		}
 		validatePool(is, path+".ipv4_pool", p.IPv4Pool)
+		validatePool6(is, path+".ipv6_pool", p.IPv6Pool)
 		validateSubnet(is, path+".ipv6_subnet", p.IPv6Subnet)
-		if len(p.Endpoints) > 0 && len(p.IPv4Pool) == 0 && p.IPv6Subnet == "" {
-			is.errf(path, "endpoints need ipv4_pool or ipv6_subnet")
+		if len(p.Endpoints) > 0 && len(p.IPv4Pool) == 0 && len(p.IPv6Pool) == 0 && p.IPv6Subnet == "" {
+			is.errf(path, "endpoints need ipv4_pool, ipv6_pool or ipv6_subnet")
 		}
 		for j, e := range p.Endpoints {
 			validateEndpoint(is, fmt.Sprintf("%s.endpoints[%d]", path, j), e)
@@ -316,6 +319,21 @@ func validatePool(is *issues, path string, pool []string) {
 		if err != nil || !a.Is4() {
 			is.errf(fmt.Sprintf("%s[%d]", path, i), "not an IPv4 address: %q", s)
 		}
+	}
+}
+
+func validatePool6(is *issues, path string, pool []string) {
+	seen := map[netip.Addr]bool{}
+	for i, s := range pool {
+		a, err := netip.ParseAddr(s)
+		if err != nil || !a.Is6() || a.Is4In6() || a.Zone() != "" {
+			is.errf(fmt.Sprintf("%s[%d]", path, i), "not an IPv6 address: %q", s)
+			continue
+		}
+		if seen[a] {
+			is.errf(fmt.Sprintf("%s[%d]", path, i), "address %s listed twice", a)
+		}
+		seen[a] = true
 	}
 }
 

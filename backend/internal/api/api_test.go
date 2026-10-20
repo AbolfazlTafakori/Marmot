@@ -52,6 +52,22 @@ func freePort(t *testing.T) uint16 {
 	return uint16(l.Addr().(*net.TCPAddr).Port)
 }
 
+// freeTCPUDPPort returns a port that is free for both TCP and UDP. On
+// Windows a TCP-free port can sit in a range reserved for UDP (Hyper-V).
+func freeTCPUDPPort(t *testing.T) uint16 {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		p := freePort(t)
+		u, err := net.ListenUDP("udp", &net.UDPAddr{Port: int(p)})
+		if err == nil {
+			_ = u.Close()
+			return p
+		}
+	}
+	t.Fatal("no port free for both TCP and UDP")
+	return 0
+}
+
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := &fixture{t: t, dir: t.TempDir()}
@@ -392,7 +408,7 @@ func TestSteeringEndpoints(t *testing.T) {
 	if code := c.do("GET", "/api/v1/steering", nil, &sv); code != 200 || len(sv.Ports) != 1 || sv.BypassNote == "" {
 		t.Fatalf("get %d %+v", code, sv)
 	}
-	newPort := int(freePort(t))
+	newPort := int(freeTCPUDPPort(t)) // the vip rule binds both
 	req := steeringView{Ports: []portRuleView{
 		{Port: int(f.userPrt), Class: "tunneled", Protocols: []string{"tcp"}},
 		{Port: newPort, Class: "vip", Protocols: []string{"udp", "tcp"}, TargetPort: 62050},
@@ -723,5 +739,25 @@ func TestAllowIPs(t *testing.T) {
 	}
 	if !ipAllowed("127.0.0.1", []string{"127.0.0.1"}) || !ipAllowed("10.0.0.5", []string{"10.0.0.0/8"}) || ipAllowed("junk", []string{"10.0.0.0/8"}) {
 		t.Fatal("ipAllowed")
+	}
+}
+
+func TestPeerIPv6PoolRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	c := f.login("root", ownerPassword)
+	other, _ := crypto.GenerateIdentity()
+	peer := peerView{ID: "v6-peer", PublicKey: config.FormatPublicKey(other.PublicKey()),
+		IPv6Pool:  []string{"2001:db8::10"},
+		Endpoints: []endpointView{{Transport: "tls", Ports: []int{9443}, Direction: "outbound"}}}
+	var pv peerView
+	if code := c.do("POST", "/api/v1/peers", peer, &pv); code != 201 || len(pv.IPv6Pool) != 1 {
+		t.Fatalf("create %d %+v", code, pv)
+	}
+	peer.Weight = 7
+	if code := c.do("PUT", "/api/v1/peers/v6-peer", peer, &pv); code != 200 || len(pv.IPv6Pool) != 1 || pv.IPv6Pool[0] != "2001:db8::10" {
+		t.Fatalf("update dropped ipv6Pool: %d %+v", code, pv)
+	}
+	if f.node.Config().Peers[0].IPv6Pool[0] != "2001:db8::10" {
+		t.Fatal("ipv6_pool not in the applied config")
 	}
 }

@@ -87,7 +87,8 @@ func (n *Node) Snapshot() Status {
 		closed[k] = v
 	}
 	n.totalsMu.Unlock()
-	for _, p := range n.cfg.Peers {
+	for i := range n.cfg.Peers {
+		p := &n.cfg.Peers[i]
 		id := core.NodeID(p.ID)
 		ps := PeerStatus{ID: id, Weight: p.Weight, State: PeerDown, Sessions: byPeer[id],
 			BytesSent: closed[id].sent, BytesRecv: closed[id].recv}

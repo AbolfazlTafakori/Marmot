@@ -66,6 +66,7 @@ export function PeerForm({
       publicKey: publicKey.trim(),
       weight: Number(weight) || 1,
       ipv4Pool: pool.split(/[,\s]+/).filter(Boolean),
+      ...(initial?.ipv6Pool?.length ? { ipv6Pool: initial.ipv6Pool } : {}),
       ...(initial?.ipv6Subnet ? { ipv6Subnet: initial.ipv6Subnet } : {}),
       endpoints: endpoints.map((d, i) => fromDraft(d, initial?.endpoints[i])),
     });

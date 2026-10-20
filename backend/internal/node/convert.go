@@ -86,7 +86,8 @@ func connConfig(c *config.Config, log *slog.Logger) session.ConnConfig {
 
 func peerKeys(c *config.Config) (*session.PeerKeys, error) {
 	m := make(map[core.NodeID]ed25519.PublicKey, len(c.Peers))
-	for _, p := range c.Peers {
+	for i := range c.Peers {
+		p := &c.Peers[i]
 		pub, err := config.ParsePublicKey(p.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("peer %s: %w", p.ID, err)

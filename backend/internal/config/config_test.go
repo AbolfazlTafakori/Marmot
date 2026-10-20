@@ -186,3 +186,36 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+func TestIPv6Pool(t *testing.T) {
+	base := validTOML()
+	ok := strings.Replace(base, `ipv4_pool = ["198.51.100.1"]`, `ipv4_pool = ["198.51.100.1"]
+ipv6_pool = ["2001:db8:2::10", "2001:db8:2::11"]`, 1)
+	l, err := Parse([]byte(ok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l.Config.Peers[0].IPv6Pool) != 2 {
+		t.Fatalf("pool %v", l.Config.Peers[0].IPv6Pool)
+	}
+	for _, bad := range []string{`"198.51.100.9"`, `"::ffff:192.0.2.1"`, `"2001:db8::1", "2001:db8::1"`, `"fe80::1%eth0"`} {
+		cfg := strings.Replace(base, `ipv4_pool = ["198.51.100.1"]`, `ipv4_pool = ["198.51.100.1"]
+ipv6_pool = [`+bad+`]`, 1)
+		if _, err := Parse([]byte(cfg)); err == nil {
+			t.Errorf("ipv6_pool [%s] accepted", bad)
+		}
+	}
+	// A peer reachable only over IPv6 is valid.
+	if !strings.Contains(base, "ipv4_pool = [\"198.51.100.1\"]\nipv6_subnet") || !strings.Contains(base, "[api]") {
+		t.Fatal("fixture changed; the replacements below would test nothing")
+	}
+	v6only := strings.Replace(base, `ipv4_pool = ["198.51.100.1"]
+ipv6_subnet = "2001:db8:2::/64"`, `ipv6_pool = ["2001:db8:2::10"]`, 1)
+	if _, err := Parse([]byte(v6only)); err != nil {
+		t.Fatalf("IPv6-only peer: %v", err)
+	}
+	local := strings.Replace(base, "[api]", "[local]\nipv6_pool = [\"2001:db8:1::5\"]\n[api]", 1)
+	if _, err := Parse([]byte(local)); err != nil {
+		t.Fatalf("local ipv6_pool: %v", err)
+	}
+}

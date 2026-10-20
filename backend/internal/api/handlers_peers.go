@@ -17,7 +17,7 @@ import (
 type sessionPath = session.PathInfo
 
 func peerViewOf(p config.Peer, health map[string]node.PeerStatus) peerView {
-	v := peerView{ID: p.ID, PublicKey: p.PublicKey, Weight: p.Weight, IPv4Pool: p.IPv4Pool,
+	v := peerView{ID: p.ID, PublicKey: p.PublicKey, Weight: p.Weight, IPv4Pool: p.IPv4Pool, IPv6Pool: p.IPv6Pool,
 		IPv6Subnet: p.IPv6Subnet, Endpoints: []endpointView{}}
 	for _, e := range p.Endpoints {
 		ev := endpointView{Transport: e.Transport, Direction: "outbound", Family: e.Family, Options: e.Options}
@@ -47,17 +47,19 @@ func (s *Server) healthByPeer() map[string]node.PeerStatus {
 func (s *Server) handlePeersList(w http.ResponseWriter, r *http.Request, a *authCtx) {
 	health := s.healthByPeer()
 	out := []peerView{}
-	for _, p := range s.cfg.Node.Config().Peers {
-		out = append(out, peerViewOf(p, health))
+	peers := s.cfg.Node.Config().Peers
+	for i := range peers {
+		out = append(out, peerViewOf(peers[i], health))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handlePeerGet(w http.ResponseWriter, r *http.Request, a *authCtx) {
 	id := r.PathValue("peerId")
-	for _, p := range s.cfg.Node.Config().Peers {
-		if p.ID == id {
-			writeJSON(w, http.StatusOK, peerViewOf(p, s.healthByPeer()))
+	peers := s.cfg.Node.Config().Peers
+	for i := range peers {
+		if peers[i].ID == id {
+			writeJSON(w, http.StatusOK, peerViewOf(peers[i], s.healthByPeer()))
 			return
 		}
 	}
@@ -67,7 +69,7 @@ func (s *Server) handlePeerGet(w http.ResponseWriter, r *http.Request, a *authCt
 // peerFromView converts an API peer to config, rejecting what Phase 1
 // cannot do (ADR-0009).
 func peerFromView(v peerView) (config.Peer, error) {
-	p := config.Peer{ID: v.ID, PublicKey: v.PublicKey, Weight: v.Weight, IPv4Pool: v.IPv4Pool, IPv6Subnet: v.IPv6Subnet}
+	p := config.Peer{ID: v.ID, PublicKey: v.PublicKey, Weight: v.Weight, IPv4Pool: v.IPv4Pool, IPv6Pool: v.IPv6Pool, IPv6Subnet: v.IPv6Subnet}
 	for i, e := range v.Endpoints {
 		path := fmt.Sprintf("endpoints[%d]", i)
 		if e.Direction != "" && e.Direction != "outbound" {
@@ -125,7 +127,8 @@ func (s *Server) handlePeerCreate(w http.ResponseWriter, r *http.Request, a *aut
 		peer = p
 	}
 	loaded, warnings, err := s.mutateConfig(func(c *config.Config) error {
-		for _, p := range c.Peers {
+		for i := range c.Peers {
+			p := &c.Peers[i]
 			if p.ID == peer.ID {
 				return &apiError{http.StatusConflict, "conflict", "a peer with this id already exists"}
 			}
@@ -145,9 +148,9 @@ func (s *Server) handlePeerCreate(w http.ResponseWriter, r *http.Request, a *aut
 }
 
 func (s *Server) writePeer(w http.ResponseWriter, status int, c *config.Config, id string, warnings []string) {
-	for _, p := range c.Peers {
-		if p.ID == id {
-			v := peerViewOf(p, s.healthByPeer())
+	for i := range c.Peers {
+		if c.Peers[i].ID == id {
+			v := peerViewOf(c.Peers[i], s.healthByPeer())
 			v.Warnings = warnings
 			writeJSON(w, status, v)
 			return

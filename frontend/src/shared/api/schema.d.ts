@@ -1057,6 +1057,7 @@ export interface components {
             /** @default 1 */
             weight: number;
             ipv4Pool?: string[];
+            ipv6Pool?: string[];
             ipv6Subnet?: string;
             /** @description Empty means the peer is inbound-only; it dials this node (ADR-0009). */
             endpoints: components["schemas"]["Endpoint"][];

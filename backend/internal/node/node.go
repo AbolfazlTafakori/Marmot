@@ -260,8 +260,8 @@ func (n *Node) EventCounts() map[string]uint64 { return n.events.snapshotCounts(
 
 func peerWeights(c *config.Config) map[core.NodeID]int {
 	m := make(map[core.NodeID]int, len(c.Peers))
-	for _, p := range c.Peers {
-		m[core.NodeID(p.ID)] = p.Weight
+	for i := range c.Peers {
+		m[core.NodeID(c.Peers[i].ID)] = c.Peers[i].Weight
 	}
 	return m
 }

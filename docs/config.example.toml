@@ -75,7 +75,8 @@ id = "kharej-germany-01"
 public_key = "ed25519:BASE64PUBLICKEY..."
 weight = 5
 ipv4_pool = ["198.51.100.1", "198.51.100.2"]
-ipv6_subnet = "2001:db8:2::/64"
+ipv6_pool = ["2001:db8:2::10"]          # IPv6 addresses the peer listens on
+ipv6_subnet = "2001:db8:2::/64"         # Phase 4: rotating addresses
 
   [[peers.endpoints]]
   transport = "tls"

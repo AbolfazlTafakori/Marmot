@@ -59,6 +59,7 @@ type SOCKS5 struct {
 // Local lists addresses this node may originate paths from.
 type Local struct {
 	IPv4Pool     []string     `toml:"ipv4_pool,omitempty"`
+	IPv6Pool     []string     `toml:"ipv6_pool,omitempty"`
 	IPv6Subnet   string       `toml:"ipv6_subnet,omitempty"`
 	IPv6Rotation IPv6Rotation `toml:"ipv6_rotation,omitempty"`
 }
@@ -108,6 +109,7 @@ type Peer struct {
 	PublicKey  string     `toml:"public_key,omitempty"`
 	Weight     int        `toml:"weight,omitempty"`
 	IPv4Pool   []string   `toml:"ipv4_pool,omitempty"`
+	IPv6Pool   []string   `toml:"ipv6_pool,omitempty"`
 	IPv6Subnet string     `toml:"ipv6_subnet,omitempty"`
 	Endpoints  []Endpoint `toml:"endpoints,omitempty"`
 }
