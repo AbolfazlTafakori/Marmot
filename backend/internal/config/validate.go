@@ -284,7 +284,21 @@ func validateEndpoint(is *issues, path string, e Endpoint) {
 	if !oneOf(e.Family, "any", "ipv4", "ipv6") {
 		is.errf(path+".family", "must be any, ipv4 or ipv6")
 	}
+	if !oneOf(e.Direction, "outbound", "inbound", "both") {
+		is.errf(path+".direction", "must be outbound, inbound or both")
+	}
+	if e.HopInterval != 0 {
+		if e.PortRange.IsZero() {
+			is.errf(path+".hop_interval", "needs port_range")
+		}
+		if e.HopInterval.D().Seconds() < 10 {
+			is.errf(path+".hop_interval", "must be at least 10s")
+		}
+	}
 }
+
+// Dialed reports whether this node dials the endpoint (ADR-0017).
+func (e *Endpoint) Dialed() bool { return e.Direction != "inbound" }
 
 func (c *Config) validateControlPlane(is *issues, user map[uint16]bool) {
 	checkListen := func(path, addr string) {

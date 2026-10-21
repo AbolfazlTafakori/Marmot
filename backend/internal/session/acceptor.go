@@ -132,6 +132,10 @@ func (a *Acceptor) newSession(acc crypto.Accepted, conn transport.Conn, peerID c
 		}
 		return s, nil
 	}
+	if !streamCapable(conn) {
+		_ = conn.Close()
+		return nil, errNeedsV2
+	}
 	rc, err := NewResumableConn(a.cfg.Conn)
 	if err != nil {
 		_ = conn.Close()

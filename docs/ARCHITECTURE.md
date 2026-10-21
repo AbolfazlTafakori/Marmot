@@ -1,6 +1,6 @@
 # Marmot — System Architecture
 
-Status: **v0.5** — Phases 1–3 implemented (see §18). Changes made while implementing them are recorded in ADRs 0009–0015 ([`docs/adr/`](adr/)).
+Status: **v0.6** — Phases 1–4 implemented (see §18). Changes made while implementing them are recorded in ADRs 0009–0019 ([`docs/adr/`](adr/)).
 Audience: the agents and engineers implementing Marmot. Decisions with lasting impact are recorded as ADRs in [`docs/adr/`](adr/).
 
 ---
@@ -149,7 +149,7 @@ type PacketConn interface {  // Datagram kind: unreliable messages
 
 - Each transport lives in `internal/transport/<name>/` and registers itself in `init()` with `transport.Register`. Inclusion is controlled with Go **build tags** (`marmot_quic`, …), so unused transports are not compiled in.
 - A transport knows nothing about sessions, peers, or FEC. It only moves bytes.
-- Initial set (Phase 1–4): `tcp`, `tls` (uTLS fingerprints), `ws` (incl. reverse), `grpc`, `quic`.
+- Set (Phase 1–4): `tcp`, `tls` (uTLS fingerprints), `ws`, `grpc`, `quic`, and `udp` (session v2 records in plain UDP with Marmot's own pacing, [ADR-0016](adr/0016-udp-transport.md)).
 - **Reverse** transports: the side that is reachable dials out; the logical direction of the session is independent of who dialed (§7.3).
 
 ---
@@ -163,13 +163,13 @@ type PacketConn interface {  // Datagram kind: unreliable messages
 Every path carries `PING/PONG` frames (default every 1 s, jittered). Per path we keep EWMA RTT, RTT variance, loss rate, throughput, and consecutive-failure count. These feed the Adaptive Controller (§11).
 
 ### 7.3 Connection direction
-Each endpoint has `direction = outbound | inbound | both`. If Iran→Foreign is blocked but Foreign→Iran works, the foreign node dials and the session is established the same way. The session layer does not care who dialed.
+Each endpoint has `direction = outbound | inbound | both` ([ADR-0017](adr/0017-endpoint-direction.md)); an `inbound` endpoint is never dialed. If Iran→Foreign is blocked but Foreign→Iran works, the foreign node dials and the session is established the same way. The session layer does not care who dialed.
 
 ### 7.4 Relay routing
 When no direct path to a peer is up, the peer's link tries a route through another node (max 2 hops by default). Relay is **source-routed** and carries a *path* of the end-to-end session, not user streams: the origin opens a path stream whose header lists the hops, each relay opens the next one and pipes bytes, and the target hands it to its session acceptor. The Noise handshake and records of the end-to-end session run inside, so relays never see user bytes (§12), and moving between relayed and direct paths is ordinary session failover ([ADR-0012](adr/0012-relay-path-streams.md)).
 
 ### 7.5 IPv6 /64 rotation and multi-IP
-Local and remote address pools are first-class. For an IPv6 `/64`, the path manager derives addresses deterministically per rotation epoch (both sides compute the same set from the shared session secret), so the set of active addresses changes over time without signalling. Requires the subnet to be routed to the host (documented in ops guide).
+Local and remote address pools are first-class. For an IPv6 `/64`, the node derives addresses deterministically per rotation epoch (SHA-256 of subnet, node id, epoch and index), for its own source addresses and for a peer's `ipv6_subnet`; no signalling is needed because the listener accepts every address of a routed `/64`. Paths on addresses of an earlier epoch, and paths older than their endpoint's `hop_interval`, are replaced make-before-break ([ADR-0018](adr/0018-ipv6-rotation-port-hopping.md)). Requires Linux and the subnet routed to the host ([deploy.md](deploy.md)).
 
 ---
 
@@ -371,6 +371,14 @@ Each phase ends with the chaos suite green before the next begins (`backend/test
 - Phase 2's relay fallback is now immediate in v2: the link joins a relayed path as soon as no direct path is healthy, on its own goroutine (`node/link_paths.go`).
 - The controller's FEC sizing assumes loss is about the same in both directions (ADR-0015 §3).
 - Invariant in session v2: each path has exactly one writer goroutine, which also sends CLOSE; batched records (`frame.Conn.AppendRecord`) depend on it.
+
+**Phase 4 status: done.** The `udp` transport with session-side pacing (ADR-0016), endpoint `direction` for reverse connections (ADR-0017), IPv6 `/64` rotation of source and destination addresses and port hopping (ADR-0018), and unreliable DATAGRAM frames for UDP flows (ADR-0019). The chaos suite adds a Phase 4 scenario: session v2 over udp paths hopping ports every 10 s under 5 % loss, beside a TLS path that is blackholed; the longest stall was 38 ms, against about 1.1 s for QUIC under the same loss. Found and fixed on the way:
+- a stream closed right after opening could send STOP before the peer knew the stream, so the STOP was lost; any stream frame now opens a stream, as in QUIC;
+- with every path suspect, new data went to the best-ranked one, which could be a fast path that had just died; it now goes to a suspect path that still receives from its peer;
+- a session that filled up while better routes were in quarantine kept a repeated route for good; the link now replaces a repeat with a free diverse route, or retires it when it is surplus. Left open, deliberately:
+- `skip_double_encryption` stays ignored: one encrypted packet carries frames of several streams, and leaving some unencrypted would need per-stream records and a second, weaker record type. The cost of encrypting once more is small next to the risk.
+- `shared = true` listeners (§6.1), which would tell Marmot handshakes from user traffic on one port, are not built: telling them apart reliably needs a fallback proxy per transport.
+- QUIC's ClientHello is Go's (quic-go has no uTLS); a udp path is recognisable by its kind byte. Obfuscating both is future work.
 
 ---
 

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"time"
 
 	"marmot/internal/core"
@@ -58,6 +59,16 @@ type recordConn interface {
 	WriteRecord(t frame.Type, body []byte, pad int) error
 	ReadRecord() (frame.Type, []byte, error)
 	Close() error
+}
+
+// errNeedsV2 means a datagram-only path (udp) was offered to session v1,
+// which needs a byte stream (ADR-0016).
+var errNeedsV2 = errors.New("session: this transport carries session v2 only")
+
+// streamCapable reports whether conn can carry session v1.
+func streamCapable(conn transport.Conn) bool {
+	_, only := conn.(transport.DatagramOnly)
+	return !only
 }
 
 // datagramPath reports whether a v2 path over conn carries its records in

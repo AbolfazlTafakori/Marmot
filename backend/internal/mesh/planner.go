@@ -99,6 +99,13 @@ func NewPlanner(cands []Candidate, now func() time.Time) *Planner {
 // HasDirect reports whether the peer has any direct candidate.
 func (p *Planner) HasDirect() bool { return len(p.direct) > 0 }
 
+// SetDirect replaces the direct candidates, as rotation epochs and port
+// hopping change them (ADR-0018). Quarantine is kept by route.
+func (p *Planner) SetDirect(cands []Candidate) {
+	p.direct = cands
+	p.next = 0
+}
+
 // SetRelays replaces the relayed candidates; they change as relay nodes
 // come and go. Quarantine of a relay that returns is kept.
 func (p *Planner) SetRelays(vias []core.NodeID) {
@@ -123,6 +130,21 @@ const (
 // last. When nothing can be tried, it returns false and how long until a
 // candidate leaves quarantine (zero if there is none to wait for).
 func (p *Planner) Next(inUse []Route, kinds Kinds) (Candidate, time.Duration, bool) {
+	return p.choose(inUse, kinds, 0)
+}
+
+// NextDiverse is Next limited to candidates that differ from every route
+// in use: it returns false rather than repeat a route.
+func (p *Planner) NextDiverse(inUse []Route, kinds Kinds) (Candidate, bool) {
+	c, _, ok := p.choose(inUse, kinds, 1)
+	return c, ok
+}
+
+// SameRoute reports whether two routes fail together in every respect
+// diversity looks at.
+func SameRoute(a, b Route) bool { return distance(a, b) == 0 }
+
+func (p *Planner) choose(inUse []Route, kinds Kinds, minScore int) (Candidate, time.Duration, bool) {
 	var pool []Candidate
 	if kinds&Direct != 0 {
 		pool = append(pool, p.direct...)
@@ -149,6 +171,9 @@ func (p *Planner) Next(inUse []Route, kinds Kinds) (Candidate, time.Duration, bo
 		// A route already up scores 0 and is taken only when nothing else
 		// is free: a second connection on it still survives a reset of the
 		// first.
+		if score < minScore {
+			continue
+		}
 		if score > bestScore || (score == bestScore && pref < bestPref) {
 			best, bestScore, bestPref = i, score, pref
 		}

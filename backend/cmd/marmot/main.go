@@ -14,6 +14,7 @@ import (
 	_ "marmot/internal/transport/quic"
 	_ "marmot/internal/transport/tcp"
 	_ "marmot/internal/transport/tls"
+	_ "marmot/internal/transport/udp"
 	_ "marmot/internal/transport/ws"
 )
 

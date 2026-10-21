@@ -157,3 +157,29 @@ func (p *mpPath) sampleLoss() {
 		p.lossFactor = min(1, p.lossFactor*1.1)
 	}
 }
+
+// paceBurst is how many full packets a paced path may send back to back.
+const paceBurst = 10
+
+// paceRefill adds the budget earned since the last refill: 1.25 × window
+// per smoothed RTT (ADR-0016 §5).
+func (p *mpPath) paceRefill(now time.Time) {
+	if !p.pace {
+		return
+	}
+	rate := 1.25 * float64(p.cwnd) / max(p.rtt(), time.Millisecond).Seconds()
+	p.tokens = math.Min(p.tokens+rate*now.Sub(p.paceAt).Seconds(), float64(paceBurst*p.maxBody))
+	p.paceAt = now
+}
+
+// paceReady reports whether a full packet may leave now.
+func (p *mpPath) paceReady() bool { return !p.pace || p.tokens >= float64(p.maxBody) }
+
+// paceWait is how long until a full packet may leave.
+func (p *mpPath) paceWait() time.Duration {
+	if p.paceReady() {
+		return 0
+	}
+	rate := 1.25 * float64(p.cwnd) / max(p.rtt(), time.Millisecond).Seconds()
+	return time.Duration((float64(p.maxBody) - p.tokens) / rate * float64(time.Second))
+}

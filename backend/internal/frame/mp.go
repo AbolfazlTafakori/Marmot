@@ -25,6 +25,7 @@ const (
 	FrameStop          Kind = 0x05
 	FrameMaxStreamData Kind = 0x06
 	FrameMaxData       Kind = 0x07
+	FrameDatagram      Kind = 0x08 // unreliable payload of a UDP flow (ADR-0019)
 )
 
 // MaxAckRanges bounds the ranges of one ACK frame.
@@ -138,6 +139,18 @@ func AppendMaxStreamData(b []byte, id uint32, limit uint64) []byte {
 	return binary.AppendUvarint(b, limit)
 }
 
+// AppendDatagram appends a DATAGRAM frame: one UDP payload of stream id,
+// never resent.
+func AppendDatagram(b []byte, id uint32, data []byte) []byte {
+	b = append(b, byte(FrameDatagram))
+	b = binary.AppendUvarint(b, uint64(id))
+	b = binary.AppendUvarint(b, uint64(len(data)))
+	return append(b, data...)
+}
+
+// DatagramFrameOverhead bounds what a DATAGRAM frame adds to its payload.
+const DatagramFrameOverhead = 1 + 5 + 3
+
 // AppendMaxData appends a MAX_DATA frame.
 func AppendMaxData(b []byte, limit uint64) []byte {
 	return binary.AppendUvarint(append(b, byte(FrameMaxData)), limit)
@@ -181,6 +194,9 @@ func ParseFrame(b []byte, f *Frame) ([]byte, error) {
 		f.Max = r.uvarint()
 	case FrameMaxData:
 		f.Max = r.uvarint()
+	case FrameDatagram:
+		f.StreamID = r.streamID()
+		f.Data = r.bytes(r.uvarint())
 	default:
 		return nil, ErrUnknownFrame
 	}

@@ -106,12 +106,13 @@ type peerView struct {
 }
 
 type endpointView struct {
-	Transport string         `json:"transport"`
-	Ports     []int          `json:"ports,omitempty"`
-	PortRange string         `json:"portRange,omitempty"`
-	Direction string         `json:"direction"`
-	Family    string         `json:"family,omitempty"`
-	Options   map[string]any `json:"options,omitempty"`
+	Transport   string         `json:"transport"`
+	Ports       []int          `json:"ports,omitempty"`
+	PortRange   string         `json:"portRange,omitempty"`
+	HopInterval string         `json:"hopInterval,omitempty"`
+	Direction   string         `json:"direction"`
+	Family      string         `json:"family,omitempty"`
+	Options     map[string]any `json:"options,omitempty"`
 }
 
 type peerHealthView struct {

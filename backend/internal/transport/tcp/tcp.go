@@ -44,6 +44,7 @@ func DialTCP(ctx context.Context, addr netip.AddrPort, local netip.Addr) (*net.T
 	d := net.Dialer{KeepAlive: keepAlive}
 	if local.IsValid() {
 		d.LocalAddr = &net.TCPAddr{IP: local.AsSlice()}
+		d.Control = transport.FreebindControl // a rotating /64 source (ADR-0018)
 	}
 	c, err := d.DialContext(ctx, "tcp", addr.String())
 	if err != nil {

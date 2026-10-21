@@ -102,8 +102,26 @@ QUIC paths carry their records in UDP datagrams, where FEC repairs loss
 only TCP leaves those paths dead, and the node falls back to the TCP-based
 ones. Marmot itself never changes firewall rules (ARCHITECTURE §1).
 
-The kernel's UDP buffers limit QUIC throughput. On busy nodes raise them:
+A `udp` listener ([ADR-0016](adr/0016-udp-transport.md)) needs UDP open the
+same way; with `port_range` it binds every port too.
+
+The kernel's UDP buffers limit QUIC and udp throughput. On busy nodes raise them:
 
 ```sh
 sysctl -w net.core.rmem_max=7500000 net.core.wmem_max=7500000
 ```
+
+## Rotating IPv6 addresses
+
+With `local.ipv6_rotation` the node dials from addresses of its `/64` that
+change every epoch, and with a peer's `ipv6_subnet` it dials addresses of
+the peer's `/64` ([ADR-0018](adr/0018-ipv6-rotation-port-hopping.md)). Both
+need the whole `/64` routed to the host and accepted as local (Linux):
+
+```sh
+ip -6 route add local 2001:db8:1::/64 dev lo
+```
+
+Marmot binds the source addresses with `IPV6_FREEBIND`, so they need no
+`ip addr add`. On other systems a node with `ipv6_rotation` enabled refuses
+to start.

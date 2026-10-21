@@ -105,6 +105,10 @@ func (s *MuxSession) Tune(Tuning) {}
 
 // addInbound implements acceptedSession.
 func (s *MuxSession) addInbound(conn transport.Conn, keys crypto.CipherPair, meta PathMeta) error {
+	if !streamCapable(conn) {
+		_ = conn.Close()
+		return errNeedsV2
+	}
 	_, err := s.conn.AddPath(frame.NewConn(conn, keys), meta)
 	return err
 }
@@ -178,6 +182,10 @@ func (s *MuxSession) Join(ctx context.Context, conn transport.Conn, meta PathMet
 	if s.role != Initiator {
 		_ = conn.Close()
 		return ErrNotInitiator
+	}
+	if !streamCapable(conn) {
+		_ = conn.Close()
+		return errNeedsV2
 	}
 	flags := crypto.FlagJoin
 	if rotate {

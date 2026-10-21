@@ -62,6 +62,15 @@ type Datagrammer interface {
 	ReceiveDatagram(ctx context.Context) ([]byte, error)
 }
 
+// DatagramOnly is implemented by a Conn whose stream only carries the
+// handshake (udp): session v1, which needs a byte stream, refuses it.
+type DatagramOnly interface{ DatagramOnly() }
+
+// Unpaced is implemented by a Datagrammer that neither paces nor
+// congestion-controls its datagrams (udp, unlike QUIC): session v2 paces
+// it (ADR-0016).
+type Unpaced interface{ Unpaced() }
+
 // PacketConn is a Datagram-kind connection.
 type PacketConn interface {
 	ReadPacket(b []byte) (int, error)

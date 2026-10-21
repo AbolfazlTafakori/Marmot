@@ -83,11 +83,11 @@ func (n *Node) applyLinks(prev, next *config.Config) {
 			continue
 		}
 		key, _ := keys.KeyOf(id)
-		cands, skipped := mesh.Expand(peerSpec(&p), locals(next), transportKnown)
+		routes, skipped := routesFor(next, p)
 		for _, t := range skipped {
 			n.log.Warn("transport not available in this build; endpoint skipped", "peer", p.ID, "transport", t)
 		}
-		fresh[id] = startLink(deps, p, key, cands)
+		fresh[id] = startLink(deps, p, key, routes)
 	}
 	for _, l := range current {
 		stale = append(stale, l)
@@ -120,7 +120,8 @@ func (n *Node) linkDeps(c *config.Config) linkDeps {
 	}
 }
 
-func locals(c *config.Config) mesh.Locals {
+// baseLocals are the configured source addresses, before rotation.
+func baseLocals(c *config.Config) mesh.Locals {
 	return mesh.Locals{V4: parseAddrs(c.Local.IPv4Pool), V6: parseAddrs(c.Local.IPv6Pool)}
 }
 
@@ -128,9 +129,13 @@ func locals(c *config.Config) mesh.Locals {
 // /64 is not dialed before Phase 4 (ADR-0011).
 func peerSpec(p *config.Peer) mesh.PeerSpec {
 	spec := mesh.PeerSpec{Addrs: append(parseAddrs(p.IPv4Pool), parseAddrs(p.IPv6Pool)...)}
-	for _, e := range p.Endpoints {
+	for i := range p.Endpoints {
+		e := &p.Endpoints[i]
+		if !e.Dialed() {
+			continue // the peer dials us here (ADR-0017)
+		}
 		spec.Endpoints = append(spec.Endpoints, mesh.Endpoint{
-			Transport: e.Transport, Ports: e.Ports, PortRange: [2]uint16{e.PortRange.Lo, e.PortRange.Hi},
+			Transport: e.Transport, Ports: e.Ports, PortRange: [2]uint16{e.PortRange.Lo, e.PortRange.Hi}, Hop: e.HopInterval.D(),
 			Family: mesh.ParseFamily(e.Family), Options: e.Options,
 		})
 	}

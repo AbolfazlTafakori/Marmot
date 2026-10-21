@@ -561,13 +561,14 @@ components:
       type: object
       required: [transport, direction]
       properties:
-        transport: { type: string, examples: [tcp, tls, ws, grpc, quic] }
+        transport: { type: string, examples: [tcp, tls, ws, grpc, quic, udp] }
         ports: { type: array, items: { type: integer } }
         portRange: { type: string, pattern: '^[0-9]{1,5}-[0-9]{1,5}$' }
+        hopInterval: { type: string, description: 'With portRange, replace a path on another port after this long (ADR-0018), e.g. "30s"' }
         direction:
           type: string
           enum: [outbound, inbound, both]
-          description: Only outbound is accepted until reverse transports (Phase 4).
+          description: outbound is dialed by this node; inbound is never dialed, the peer dials us; both is dialed and the peer may dial too (ADR-0017).
         family: { type: string, enum: [any, ipv4, ipv6], default: any }
         options:
           type: object

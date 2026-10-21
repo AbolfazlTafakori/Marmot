@@ -82,10 +82,12 @@ func (Transport) Dial(ctx context.Context, ep transport.Endpoint, local netip.Ad
 	if local.IsValid() {
 		laddr = net.UDPAddrFromAddrPort(netip.AddrPortFrom(local, 0))
 	}
-	udp, err := net.ListenUDP("udp", laddr)
+	lc := net.ListenConfig{Control: transport.FreebindControl} // a rotating /64 source (ADR-0018)
+	pc, err := lc.ListenPacket(ctx, "udp", laddr.String())
 	if err != nil {
 		return nil, fmt.Errorf("quic: bind %v: %w", laddr, err)
 	}
+	udp := pc.(*net.UDPConn)
 	tr := &quicgo.Transport{Conn: udp}
 	conf := &stdtls.Config{
 		ServerName:         sni,

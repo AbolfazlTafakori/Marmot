@@ -20,7 +20,10 @@ func (l *peerLink) maintain(ctx context.Context, s session.PeerSession) {
 	defer t.Stop()
 	lastRotate, baseBytes := time.Now(), sessionBytes(s)
 	for {
+		l.refreshRoutes(time.Now())
 		l.replaceLossy(ctx, s)
+		l.refreshPaths(ctx, s, time.Now())
+		l.diversify(ctx, s)
 		l.fillStandby(ctx, s)
 		// After the standbys: direct paths that just came back let the
 		// session leave the relay in this same pass.
@@ -185,28 +188,90 @@ func (l *peerLink) replaceLossy(ctx context.Context, s session.PeerSession) {
 		return
 	}
 	for _, id := range ids {
-		st := s.Stats()
-		found := false
-		var others []mesh.Route
-		for i := range st.Paths {
-			if st.Paths[i].ID == id {
-				found = true
-			} else {
-				others = append(others, routeOf(st.Paths[i].Meta))
-			}
-		}
-		if !found {
-			continue
-		}
-		if c, _, ok := l.next(others); ok {
-			if err := l.join(ctx, s, c, false); err != nil {
-				l.fail(c, "replacement join failed", err)
-			}
-		}
-		if r.Retire(id) {
-			l.deps.events.publish(EventRotation, map[string]any{"peer": l.id, "reason": "lossy"})
+		l.replacePath(ctx, s, r, id, "lossy")
+	}
+}
+
+// diversify replaces, make-before-break, a v2 path that repeats the route
+// of another one while a route that differs from all of them is free. A
+// repeat is taken only when nothing else could be dialed (a peer still
+// starting, say); once the other routes leave quarantine, the session
+// should not stay less diverse than it can be (ADR-0011).
+func (l *peerLink) diversify(ctx context.Context, s session.PeerSession) {
+	r, ok := s.(retirer)
+	if !ok {
+		return
+	}
+	st := s.Stats()
+	var live []*session.PathInfo
+	for i := range st.Paths {
+		if !st.Paths[i].Draining {
+			live = append(live, &st.Paths[i])
 		}
 	}
+	for j := 1; j < len(live); j++ {
+		for i := range j {
+			if !mesh.SameRoute(routeOf(live[i].Meta), routeOf(live[j].Meta)) {
+				continue
+			}
+			var others []mesh.Route
+			for k := range live {
+				if k != j {
+					others = append(others, routeOf(live[k].Meta))
+				}
+			}
+			l.planMu.Lock()
+			l.applyPreferenceLocked()
+			c, ok := l.plan.NextDiverse(others, mesh.Direct)
+			l.planMu.Unlock()
+			if !ok {
+				// Nothing more diverse is free; a repeat beyond the
+				// paths the session should have is only extra load.
+				if len(live) > 1+l.deps.standby && r.Retire(live[j].ID) {
+					l.deps.log.Debug("surplus repeated route retired")
+				}
+				return
+			}
+			if err := l.join(ctx, s, c, false); err != nil {
+				l.fail(c, "diverse join failed", err)
+				return
+			}
+			if r.Retire(live[j].ID) {
+				l.deps.log.Debug("repeated route replaced by a diverse one", "via", c.Key())
+				l.deps.events.publish(EventRotation, map[string]any{"peer": l.id, "reason": "diversity"})
+			}
+			return // one per pass
+		}
+	}
+}
+
+// replacePath joins a new path, then drains path id: make-before-break.
+// It reports whether the path was there to replace.
+func (l *peerLink) replacePath(ctx context.Context, s session.PeerSession, r retirer, id uint64, reason string) bool {
+	st := s.Stats()
+	found := false
+	var others []mesh.Route
+	for i := range st.Paths {
+		if st.Paths[i].ID == id {
+			found = true
+		} else {
+			others = append(others, routeOf(st.Paths[i].Meta))
+		}
+	}
+	if !found {
+		return false
+	}
+	if c, _, ok := l.next(others); ok {
+		if err := l.join(ctx, s, c, false); err != nil {
+			l.fail(c, "replacement join failed", err)
+		}
+	}
+	if !r.Retire(id) {
+		return false
+	}
+	l.deps.log.Debug("path replaced", "reason", reason)
+	l.deps.events.publish(EventRotation, map[string]any{"peer": l.id, "reason": reason})
+	return true
 }
 
 // leaveRelay moves a session whose active path is relayed onto a direct
@@ -268,6 +333,7 @@ func (l *peerLink) join(ctx context.Context, s session.PeerSession, c mesh.Candi
 		return err
 	}
 	l.succeeded(c)
+	l.noteHop(meta, c.Hop)
 	return nil
 }
 

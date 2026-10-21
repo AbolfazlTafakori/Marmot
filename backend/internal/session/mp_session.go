@@ -58,6 +58,8 @@ type MPSession struct {
 	retxQ       []*mpStream // streams with lost bytes
 	ctrlQ       []ctrlItem
 	dupQ        []dupItem
+	dgQ         []dgItem // DATAGRAM frames waiting (ADR-0019)
+	dgBytes     int
 	maxDataPend bool
 
 	sendMax   uint64 // the peer's MAX_DATA

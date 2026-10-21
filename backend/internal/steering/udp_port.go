@@ -188,7 +188,7 @@ func (f *udpFlow) run() {
 		case <-f.done:
 			return
 		case pkt := <-f.queue:
-			err := frame.WriteDatagram(st, scratch, *pkt)
+			err := session.WriteDatagram(st, scratch, *pkt)
 			core.PutBuf(pkt)
 			if err != nil {
 				return
@@ -203,7 +203,7 @@ func (f *udpFlow) downlink(st session.Stream) {
 	defer f.close()
 	buf := make([]byte, frame.MaxDatagram)
 	for {
-		n, err := frame.ReadDatagram(st, buf)
+		n, err := session.ReadDatagram(st, buf)
 		if err != nil {
 			return
 		}

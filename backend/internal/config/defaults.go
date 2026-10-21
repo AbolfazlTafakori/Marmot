@@ -66,6 +66,7 @@ func (c *Config) ApplyDefaults() {
 		setInt(&c.Peers[i].Weight, DefaultPeerWeight)
 		for j := range c.Peers[i].Endpoints {
 			setStr(&c.Peers[i].Endpoints[j].Family, "any")
+			setStr(&c.Peers[i].Endpoints[j].Direction, "outbound")
 		}
 	}
 

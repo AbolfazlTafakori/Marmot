@@ -65,6 +65,8 @@ type mpStream struct {
 	maxPending  bool // MAX_STREAM_DATA queued
 	stopPending bool // STOP queued
 
+	dg dgState // datagrams of a UDP flow (ADR-0019)
+
 	closedAt time.Time
 	freed    bool
 }
@@ -77,6 +79,7 @@ func newMPStream(s *MPSession, id uint32, local bool) *mpStream {
 		sbuf:    newRing(4<<10, streamWindow),
 		sendMax: streamWindow, recvMax: streamWindow,
 		rbuf: recvBuf{max: streamWindow},
+		dg:   dgState{in: make(chan []byte, dgRecvQueue), pumpDone: make(chan struct{})},
 	}
 }
 

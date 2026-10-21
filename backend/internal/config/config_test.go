@@ -135,6 +135,14 @@ func TestParseInvalid(t *testing.T) {
 		{"small subnet", func(s string) string { return strings.Replace(s, "2001:db8:2::/64", "2001:db8:2::/96", 1) }, "/64"},
 		{"bad port range", func(s string) string { return strings.Replace(s, "40000-40010", "40010-40000", 1) }, "port range"},
 		{"endpoint without ports", func(s string) string { return strings.Replace(s, "  ports = [9443]\n", "", 1) }, "exactly one"},
+		{"bad direction", func(s string) string {
+			return strings.Replace(s, "  ports = [9443]\n", "  ports = [9443]\n  direction = \"sideways\"\n", 1)
+		}, "direction"},
+		{"hop without range", func(s string) string {
+			return strings.Replace(s, "  ports = [9443]\n", "  ports = [9443]\n  hop_interval = \"30s\"\n", 1)
+		}, "needs port_range"},
+		{"listen range too wide", func(s string) string { return strings.Replace(s, "40000-40010", "40000-41000", 1) }, "more than 256"},
+		{"bad session version", func(s string) string { return s + "\n[session]\nversion = 3\n" }, "session.version"},
 		{"bad toml", func(string) string { return "[[[" }, ""},
 	}
 	for _, tt := range tests {

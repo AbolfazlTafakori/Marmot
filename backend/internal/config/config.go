@@ -118,10 +118,11 @@ type Peer struct {
 	Endpoints  []Endpoint `toml:"endpoints,omitempty"`
 }
 
-// Endpoint is one way to dial a peer. A peer without endpoints is
-// inbound-only: it dials us (reverse connection).
+// Endpoint is one way to reach a peer. A peer without endpoints, or with
+// only inbound ones, is inbound-only: it dials us (ADR-0017).
 type Endpoint struct {
 	Transport   string         `toml:"transport,omitempty"`
+	Direction   string         `toml:"direction,omitempty"` // outbound | inbound | both
 	Ports       []uint16       `toml:"ports,omitempty"`
 	PortRange   PortRange      `toml:"port_range,omitempty"`
 	HopInterval Duration       `toml:"hop_interval,omitempty"`

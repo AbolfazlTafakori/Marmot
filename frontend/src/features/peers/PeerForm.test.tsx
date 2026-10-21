@@ -60,4 +60,31 @@ describe('PeerForm', () => {
     const saved = onSubmit.mock.calls[0]?.[0] as Peer;
     expect(saved.endpoints[0]?.options).toEqual({ datagrams: false });
   });
+
+  it('keeps the direction and hop interval of a reverse udp endpoint', async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const reverse: Peer = {
+      ...peer,
+      endpoints: [
+        {
+          transport: 'udp',
+          direction: 'inbound',
+          family: 'any',
+          portRange: '41000-41009',
+          hopInterval: '30s',
+        },
+      ],
+    };
+    renderWithProviders(<PeerForm initial={reverse} busy={false} onSubmit={onSubmit} onCancel={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'ذخیره و اعمال' }));
+    const saved = onSubmit.mock.calls[0]?.[0] as Peer;
+    expect(saved.endpoints[0]).toEqual({
+      transport: 'udp',
+      direction: 'inbound',
+      family: 'any',
+      portRange: '41000-41009',
+      hopInterval: '30s',
+    });
+  });
 });

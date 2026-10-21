@@ -7,6 +7,7 @@ package mesh
 import (
 	"math/rand/v2"
 	"net/netip"
+	"time"
 
 	"marmot/internal/core"
 )
@@ -48,7 +49,8 @@ func (f Family) allows(a netip.Addr) bool {
 type Endpoint struct {
 	Transport string
 	Ports     []uint16
-	PortRange [2]uint16 // inclusive; zero = unset
+	PortRange [2]uint16     // inclusive; zero = unset
+	Hop       time.Duration // replace a path after this long (port hopping); 0 = never
 	Family    Family
 	Options   map[string]any
 }
@@ -72,7 +74,8 @@ type Candidate struct {
 	Local     netip.Addr // invalid = OS chooses
 	Remote    netip.AddrPort
 	Options   map[string]any
-	Via       core.NodeID // relay node of a relayed candidate
+	Via       core.NodeID   // relay node of a relayed candidate
+	Hop       time.Duration // port hopping interval of its endpoint; 0 = none
 }
 
 // Key identifies a candidate's route for quarantine.
@@ -121,7 +124,7 @@ func Expand(p PeerSpec, locals Locals, known func(string) bool) ([]Candidate, []
 			for _, port := range ports {
 				for _, l := range srcs {
 					out = append(out, Candidate{Transport: e.Transport, Local: l,
-						Remote: netip.AddrPortFrom(addr, port), Options: e.Options})
+						Remote: netip.AddrPortFrom(addr, port), Options: e.Options, Hop: e.Hop})
 				}
 			}
 		}

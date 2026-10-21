@@ -28,6 +28,7 @@ const (
 	CapRelay     uint32 = 1 << 1
 	CapVIPDup    uint32 = 1 << 2
 	CapMultipath uint32 = 1 << 3
+	CapDatagrams uint32 = 1 << 4 // unreliable datagrams for UDP flows (ADR-0019)
 )
 
 // Hello is the initiator's encrypted handshake payload.

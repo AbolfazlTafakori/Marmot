@@ -53,13 +53,17 @@ func (s *MPSession) writeLoop(p *mpPath) {
 			return
 		}
 		n, size := 0, 0
-		for n < maxBatch && size < maxBatchBytes {
+		p.paceRefill(now)
+		for n < maxBatch && size < maxBatchBytes && p.paceReady() {
 			typ, body, ok := s.buildLocked(p, now, bufs[n][:0])
 			if !ok {
 				break
 			}
 			types[n], bodies[n], bufs[n] = typ, body, body[:0]
 			size += len(body)
+			if p.pace {
+				p.tokens -= float64(len(body))
+			}
 			n++
 		}
 		if n > 0 {
@@ -142,20 +146,31 @@ func (s *MPSession) onTimersLocked(p *mpPath, now time.Time) {
 	p.needProbe = true
 	if !p.suspect {
 		wasFirst := len(s.order) > 0 && s.order[0] == p
-		p.suspect = true
+		p.suspect, p.suspectAt = true, now
 		s.reorderLocked()
+		// On a lossy path suspicion can come and go many times a second:
+		// report a failover once per path per failoverQuiet, the rest at
+		// debug level.
+		report := wasFirst && now.Sub(p.lastFailover) >= failoverQuiet
+		if report {
+			p.lastFailover = now
+		}
 		if wasFirst {
 			// The failover of v2: the leading path stopped being
 			// acknowledged and its traffic moves to the next healthy path,
 			// or to one the link adds now (a relay, say).
+			via := any("none healthy yet")
 			if next := s.order[0]; next.healthy() {
-				s.log.Info("failover", "from", p.meta, "via", next.meta)
+				via = next.meta
+			}
+			if report {
+				s.log.Info("failover", "from", p.meta, "via", via)
 			} else {
-				s.log.Info("failover", "from", p.meta, "via", "none healthy yet")
+				s.log.Debug("failover", "from", p.meta, "via", via)
 			}
 		}
 		if cb := s.cfg.OnPathSuspect; cb != nil {
-			info := p.info(wasFirst)
+			info := p.info(report)
 			go cb(info)
 		}
 	}
@@ -179,10 +194,13 @@ func (s *MPSession) carriesLocked(p *mpPath) bool {
 		return false
 	}
 	if p.suspect {
-		return !s.otherHealthyLocked(p) && (p.hasRoom() || p.needProbe)
+		return p == s.bestSuspectLocked() && (p.hasRoom() || p.needProbe)
 	}
 	return p.hasRoom()
 }
+
+// failoverQuiet spaces the failover reports of one path.
+const failoverQuiet = 10 * time.Second
 
 // nextDeadlineLocked is when p's writer must look again without a wake-up.
 func (s *MPSession) nextDeadlineLocked(p *mpPath, now time.Time) time.Time {
@@ -204,6 +222,9 @@ func (s *MPSession) nextDeadlineLocked(p *mpPath, now time.Time) time.Time {
 	}
 	if p.draining {
 		earlier(p.drainSince.Add(drainTimeout))
+	}
+	if w := p.paceWait(); w > 0 {
+		earlier(now.Add(w))
 	}
 	return next
 }
@@ -233,6 +254,7 @@ func (s *MPSession) buildLocked(p *mpPath, now time.Time, dst []byte) (frame.Typ
 		frames, fr = s.appendRetxLocked(p, frames, fr, limit)
 		frames, fr = s.appendDupLocked(p, frames, fr, limit, now)
 		if s.eligibleNewLocked(p) {
+			frames, fr = s.appendDatagramsLocked(frames, fr, limit)
 			frames, fr = s.appendNewLocked(p, frames, fr, limit, now)
 		}
 	}

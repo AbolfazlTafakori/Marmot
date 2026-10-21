@@ -590,3 +590,28 @@ func BenchmarkV2Throughput(b *testing.B) {
 		})
 	}
 }
+
+// With every path suspect, data goes to one the peer still reaches, not
+// the best ranked or the last acknowledged: a busy fast path that just
+// died has both.
+func TestBestSuspectStillReceives(t *testing.T) {
+	now := time.Now()
+	// The dead path carried everything until 100 ms ago; the lossy idle
+	// one has heard from its peer since turning suspect.
+	dead := &mpPath{id: 1, suspect: true, suspectAt: now.Add(-90 * time.Millisecond),
+		lastRecv: now.Add(-100 * time.Millisecond), lastProgress: now.Add(-100 * time.Millisecond)}
+	lossy := &mpPath{id: 2, suspect: true, suspectAt: now.Add(-80 * time.Millisecond),
+		lastRecv: now.Add(-20 * time.Millisecond), lastProgress: now.Add(-2 * time.Second)}
+	s := &MPSession{order: []*mpPath{dead, lossy}}
+	if got := s.bestSuspectLocked(); got != lossy {
+		t.Fatalf("picked path %d, want the one that still receives", got.id)
+	}
+	if !s.eligibleNewLocked(lossy) || s.eligibleNewLocked(dead) {
+		t.Fatal("new data must go to the recently acknowledged suspect only")
+	}
+	healthy := &mpPath{id: 3}
+	s.order = append([]*mpPath{healthy}, s.order...)
+	if s.bestSuspectLocked() != nil {
+		t.Fatal("a suspect path chosen while a healthy one exists")
+	}
+}

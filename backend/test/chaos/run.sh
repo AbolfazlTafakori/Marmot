@@ -12,11 +12,14 @@
 # Phase 3: session v2 over two QUIC datagram paths and one TLS path. Random
 # 5 % loss on QUIC must raise FEC and be repaired by it; then TLS and one
 # QUIC path are blackholed. The stream must survive with no stall over 2 s.
+# Phase 4: session v2 over the udp transport with port hopping every 10 s
+# and 5 % loss, beside a TLS path that is then blackholed; FEC must rise,
+# ports must hop, and no stall may exceed 2 s.
 # Runs inside a Linux container with NET_ADMIN; use docker.sh.
 set -u
 fail() {
   echo "FAIL: $*"
-  for f in iran2.log relay.log kharej2.log iran3.log kharej3.log; do
+  for f in iran2.log relay.log kharej2.log iran3.log kharej3.log iran4.log kharej4.log; do
     [ -f "$f" ] && { echo "--- $f (last 80 lines)"; tail -n 80 "$f"; }
   done
   exit 1
@@ -348,4 +351,78 @@ echo "== SIGTERM (phase 3 nodes)"
 kill -TERM $I3P $K3P; wait $I3P; A=$?; wait $K3P; B=$?
 [ $A -eq 0 ] && [ $B -eq 0 ] || fail "exit codes iran3=$A kharej3=$B"
 if grep -h '"level":"ERROR"' iran3.log kharej3.log; then fail "errors in phase 3 logs"; fi
+
+# ---------------------------------------------------------------- Phase 4
+I4=$(./marmot keygen -out iran4.key); K4=$(./marmot keygen -out kharej4.key)
+cat > kharej4.toml <<CFG
+[node]
+id = "kharej-04"
+identity_key_file = "kharej4.key"
+[[transport_listen]]
+transport = "udp"
+port_range = "9741-9744"
+[[transport_listen]]
+transport = "tls"
+port = 9745
+[[peers]]
+id = "iran-04"
+public_key = "$I4"
+[telemetry]
+metrics_listen = "127.0.0.1:29291"
+[api]
+listen = "127.0.0.1:27473"
+data_dir = "data-k4"
+CFG
+cat > iran4.toml <<CFG
+[node]
+id = "iran-04"
+identity_key_file = "iran4.key"
+[steering]
+tunneled_ports = [22082]
+[steering.port_map]
+22082 = 23030
+[session]
+probe_interval = "250ms"
+standby_paths = 2
+[telemetry]
+metrics_listen = "127.0.0.1:29290"
+[[peers]]
+id = "kharej-04"
+public_key = "$K4"
+ipv4_pool = ["127.0.0.1"]
+  [[peers.endpoints]]
+  transport = "udp"
+  port_range = "9741-9744"
+  hop_interval = "10s"
+  [[peers.endpoints]]
+  transport = "tls"
+  ports = [9745]
+  options = { sni = "www.example.com" }
+[api]
+listen = "127.0.0.1:27475"
+data_dir = "data-i4"
+CFG
+./marmot run -config kharej4.toml 2> kharej4.log & K4P=$!
+./marmot run -config iran4.toml 2> iran4.log & I4P=$!
+sleep 3
+
+echo "== 60 s verified stream over udp with port hopping; 5 % loss on udp, then tls blackholed"
+./chaos -via 127.0.0.1:22082 -echo 127.0.0.1:23030 -for 60s -rate 4194304 > chaos4.out & CP=$!
+sleep 5; for p in 9741 9742 9743 9744; do udploss $p || fail "iptables statistic match unavailable"; done
+echo "   t=5   5 % random loss on every udp port"
+sleep 15; blackhole 9745; echo "   t=20  tls blocked: udp paths only"
+sleep 30; restore 9745; for p in 9741 9742 9743 9744; do udplossoff $p; done; echo "   t=50  everything restored"
+wait $CP || { cat chaos4.out; fail "stream did not survive phase 4"; }
+cat chaos4.out
+stall_ms chaos4.out 2000 || fail "longest stall over 2000ms on lossy udp paths"
+grep -q '"msg":"fec level".*"parity":[1-9]' iran4.log kharej4.log || fail "FEC was not raised on lossy udp paths"
+ROT=$(metric 29290 marmot_rotations_total)
+echo "   rotations (port hops among them): $ROT"
+[ "$ROT" -ge 3 ] || fail "paths did not hop ports every 10 s"
+grep -q '"msg":"inbound session".*"version":2' kharej4.log || fail "phase 4 did not run on session v2"
+
+echo "== SIGTERM (phase 4 nodes)"
+kill -TERM $I4P $K4P; wait $I4P; A=$?; wait $K4P; B=$?
+[ $A -eq 0 ] && [ $B -eq 0 ] || fail "exit codes iran4=$A kharej4=$B"
+if grep -h '"level":"ERROR"' iran4.log kharej4.log; then fail "errors in phase 4 logs"; fi
 echo "CHAOS SUITE PASSED"

@@ -21,6 +21,7 @@ func TestFramesRoundTrip(t *testing.T) {
 	b = AppendStop(b, 11)
 	b = AppendMaxStreamData(b, 13, 1<<21)
 	b = AppendMaxData(b, 1<<24)
+	b = AppendDatagram(b, 15, []byte("udp"))
 
 	pn, rest, err := ParsePacket(b)
 	if err != nil || pn != 1<<40 {
@@ -35,6 +36,7 @@ func TestFramesRoundTrip(t *testing.T) {
 		{Type: FrameStop, StreamID: 11},
 		{Type: FrameMaxStreamData, StreamID: 13, Max: 1 << 21},
 		{Type: FrameMaxData, Max: 1 << 24},
+		{Type: FrameDatagram, StreamID: 15, Data: []byte("udp")},
 	}
 	var f Frame
 	for i, w := range want {

@@ -47,10 +47,11 @@ type linkDeps struct {
 // mesh.Planner: diverse routes first, failed ones in quarantine, relayed
 // routes only while no direct path is up (ADR-0011, ADR-0012).
 type peerLink struct {
-	deps linkDeps
-	cfg  config.Peer
-	id   core.NodeID
-	key  ed25519.PublicKey
+	deps   linkDeps
+	cfg    config.Peer
+	id     core.NodeID
+	key    ed25519.PublicKey
+	routes linkRoutes
 
 	// planMu guards plan and relayTurn: run and the relay watcher of a v2
 	// session both choose routes.
@@ -62,6 +63,7 @@ type peerLink struct {
 	sess    session.PeerSession
 	pref    func(mesh.Candidate) int // from the controller; applied by run
 	replace []uint64                 // lossy paths the controller wants replaced
+	hops    map[string]time.Duration // hop interval by path transport|remote
 
 	wake      chan struct{} // wakes maintain
 	relayWake chan struct{} // wakes the relay watcher
@@ -69,10 +71,11 @@ type peerLink struct {
 	done      chan struct{}
 }
 
-func startLink(deps linkDeps, p config.Peer, key ed25519.PublicKey, cands []mesh.Candidate) *peerLink {
+func startLink(deps linkDeps, p config.Peer, key ed25519.PublicKey, routes linkRoutes) *peerLink {
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &peerLink{
-		deps: deps, cfg: p, id: core.NodeID(p.ID), key: key, plan: mesh.NewPlanner(cands, nil),
+		deps: deps, cfg: p, id: core.NodeID(p.ID), key: key, routes: routes,
+		plan: mesh.NewPlanner(routes.build(time.Now()), nil),
 		wake: make(chan struct{}, 1), relayWake: make(chan struct{}, 1), cancel: cancel, done: make(chan struct{}),
 	}
 	l.deps.log = deps.log.With("peer", p.ID)
@@ -272,6 +275,7 @@ func (l *peerLink) establish(ctx context.Context) (session.PeerSession, time.Dur
 			continue
 		}
 		l.succeeded(c)
+		l.noteHop(meta, c.Hop)
 		return s, 0
 	}
 	return nil, 0

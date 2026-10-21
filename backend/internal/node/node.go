@@ -21,6 +21,7 @@ import (
 	"marmot/internal/session"
 	"marmot/internal/socks5"
 	"marmot/internal/steering"
+	"marmot/internal/transport"
 )
 
 // Errors returned by Node.
@@ -28,6 +29,8 @@ var (
 	ErrNotRunning      = errors.New("node: not running")
 	ErrAlreadyRunning  = errors.New("node: already running")
 	ErrRestartRequired = errors.New("node: node id or identity changed; restart required")
+	// ErrRotationUnsupported: rotating /64 addresses need Linux (ADR-0018).
+	ErrRotationUnsupported = errors.New("node: local.ipv6_rotation needs Linux (IPV6_FREEBIND)")
 )
 
 // Options are fixed for the life of a Node.
@@ -127,6 +130,9 @@ func (n *Node) Start() error {
 	cfg := n.cfg
 	n.mu.Unlock()
 
+	if cfg.Local.IPv6Rotation.Enabled && !transport.FreebindSupported {
+		return ErrRotationUnsupported
+	}
 	keys, err := peerKeys(cfg)
 	if err != nil {
 		return err

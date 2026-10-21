@@ -49,7 +49,7 @@ func (f *Forwarder) pumpUDP(p *Policy, st session.Stream, c net.Conn) {
 		defer stop()
 		buf := make([]byte, frame.MaxDatagram)
 		for {
-			n, err := frame.ReadDatagram(st, buf)
+			n, err := session.ReadDatagram(st, buf)
 			if err != nil {
 				return
 			}
@@ -77,7 +77,7 @@ func (f *Forwarder) pumpUDP(p *Policy, st session.Stream, c net.Conn) {
 			return
 		}
 		touch()
-		if err := frame.WriteDatagram(st, scratch, buf[:n]); err != nil {
+		if err := session.WriteDatagram(st, scratch, buf[:n]); err != nil {
 			return
 		}
 		f.bytesOut.Add(int64(n))

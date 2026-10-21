@@ -170,7 +170,8 @@ A node that receives a path stream with `route_len > 0` checks its transit polic
 | 1 | relay transit allowed |
 | 2 | VIP duplication |
 | 3 | v2 multipath frames |
-| 4–31 | reserved |
+| 4 | unreliable datagrams for UDP flows (v2, §11.3) |
+| 5–31 | reserved |
 
 ---
 
@@ -216,8 +217,11 @@ A packet is **ack-eliciting** if it holds any frame but ACK. REPAIR packets are 
 | 0x05 | STOP | `sid:v` — the sender will read no more; the peer answers with RESET unless its FIN was already acknowledged |
 | 0x06 | MAX_STREAM_DATA | `sid:v | max:v` — the peer may send stream bytes below `max` |
 | 0x07 | MAX_DATA | `max:v` — the same for the sum over all streams |
+| 0x08 | DATAGRAM | `sid:v | len:v | data[len]` — one UDP payload of stream `sid`, never resent ([ADR-0019](../adr/0019-unreliable-datagram-flows.md)) |
 
 - **ACK** acknowledges packets of the path it arrives on. The first range is `[largest − first, largest]`; each further range ends `gap + 2` below the previous range's smallest number and spans `len + 1` numbers (as QUIC). At most 32 ranges. `delay_us` is how long the receiver held the ACK.
+- **Any stream frame** (STREAM, RESET, STOP, MAX_STREAM_DATA) of an unknown id of the peer's parity opens that stream, as in QUIC: a stream closed at once may send STOP before the STREAM frame with its header. DATAGRAM frames of an unknown stream are dropped, and the sender holds them until the stream's header is out.
+- **DATAGRAM** frames need capability bit 4. They bypass flow control; a receiver keeps at most 256 unread per stream. A payload larger than fits one packet of the carrying path goes on the stream (§6.1), so a UDP flow's reader reads both.
 - **STREAM**: the initiator opens odd stream ids, the responder even ones; the first frame of an unknown id from the peer opens a stream. `fin = 1` marks `off + len` as the final size. The stream carries the header and reply byte of §6.
 - A stream is gone once both directions ended: FIN acknowledged or RESET acknowledged when sending; FIN reached or RESET received when receiving. Bytes up to a direction's final size count against the session window even if they are discarded, so a closed stream never leaks window.
 - `Close` sends FIN after the data already written and STOP if the peer's direction has not ended. Aborting a stream sends RESET and STOP.
@@ -230,3 +234,17 @@ A packet is **ack-eliciting** if it holds any frame but ACK. REPAIR packets are 
 
 ### 11.5 FEC ([ADR-0014](../adr/0014-quic-datagram-paths-fec.md))
 On datagram paths only. A source packet is sent as PKT_FEC; its **symbol** is `path_id:u64 | pn:u64 | len:u16 | frames[len]`, zero-padded to the longest symbol of its group. `group` counts up per session and direction; `index` is `0..k−1` for sources and `k..k+m−1` for REPAIR, whose `parity` is the Reed-Solomon parity shard (`klauspost/reedsolomon`, `k` data and `m` parity shards) over the padded symbols. A receiver holding any `k` shards of a group rebuilds the missing sources and processes each as if it had arrived on path `path_id` with number `pn`. Groups older than 1 s are dropped.
+
+---
+
+## 12. The udp transport ([ADR-0016](../adr/0016-udp-transport.md))
+
+Each UDP datagram starts with a kind byte:
+
+| Kind | Body |
+|---|---|
+| `1` handshake | `seq:u8 | message` — one Noise handshake message (§3) |
+| `2` record | one datagram record (§4.2) |
+| `3` close | — the sender closes the path |
+
+Each side numbers its handshake messages from 0 and sends its last one again every 250 ms until a handshake message with the next number, or a record, arrives from the peer; a repeat of the peer's last message makes it send its own again. A udp path carries session v2 only. Records are at most 1,199 bytes, so the datagram fits 1,200.

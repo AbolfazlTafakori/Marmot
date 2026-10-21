@@ -12,6 +12,7 @@ import (
 
 	"marmot/internal/core"
 	"marmot/internal/frame"
+	"marmot/internal/session"
 )
 
 // flowQueue bounds datagrams waiting for a slow stream; beyond it they are
@@ -220,7 +221,7 @@ func (f *udpFlow) run() {
 		case <-f.done:
 			return
 		case pkt := <-f.queue:
-			err := frame.WriteDatagram(st, scratch, *pkt)
+			err := session.WriteDatagram(st, scratch, *pkt)
 			core.PutBuf(pkt)
 			if err != nil {
 				return
@@ -238,7 +239,7 @@ func (f *udpFlow) downlink(st io.Reader) {
 	buf := make([]byte, frame.MaxDatagram)
 	out := make([]byte, 0, 262+frame.MaxDatagram)
 	for {
-		n, err := frame.ReadDatagram(st, buf)
+		n, err := session.ReadDatagram(st, buf)
 		if err != nil {
 			return
 		}

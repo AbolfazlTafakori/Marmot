@@ -1069,12 +1069,15 @@ export interface components {
              * @example ws
              * @example grpc
              * @example quic
+             * @example udp
              */
             transport: string;
             ports?: number[];
             portRange?: string;
+            /** @description With portRange, replace a path on another port after this long (ADR-0018), e.g. "30s" */
+            hopInterval?: string;
             /**
-             * @description Only outbound is accepted until reverse transports (Phase 4).
+             * @description outbound is dialed by this node; inbound is never dialed, the peer dials us; both is dialed and the peer may dial too (ADR-0017).
              * @enum {string}
              */
             direction: "outbound" | "inbound" | "both";

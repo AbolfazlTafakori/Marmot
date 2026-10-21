@@ -196,7 +196,14 @@ func (s *MPSession) applyFrameLocked(p *mpPath, f *frame.Frame, now time.Time) e
 	case frame.FrameReset:
 		return s.onResetLocked(f)
 	case frame.FrameStop:
-		if st := s.streams[f.StreamID]; st != nil && !st.stopped {
+		// Any stream frame may be the first the peer's new stream sends,
+		// as in QUIC: a stream closed at once sends STOP before the STREAM
+		// frame that carries its header.
+		st, err := s.streamForLocked(f.StreamID)
+		if err != nil {
+			return err
+		}
+		if st != nil && !st.stopped {
 			st.stopped = true
 			s.resetSendLocked(st, 0)
 			s.maybeFreeLocked(st)
@@ -204,11 +211,17 @@ func (s *MPSession) applyFrameLocked(p *mpPath, f *frame.Frame, now time.Time) e
 			s.wakeWriters()
 		}
 	case frame.FrameMaxStreamData:
-		if st := s.streams[f.StreamID]; st != nil && f.Max > st.sendMax {
+		st, err := s.streamForLocked(f.StreamID)
+		if err != nil {
+			return err
+		}
+		if st != nil && f.Max > st.sendMax {
 			st.sendMax = f.Max
 			s.queueSendLocked(st)
 			s.wakeWriters()
 		}
+	case frame.FrameDatagram:
+		s.onDatagramLocked(f)
 	case frame.FrameMaxData:
 		if f.Max > s.sendMax {
 			s.sendMax = f.Max

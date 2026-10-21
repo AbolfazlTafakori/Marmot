@@ -33,6 +33,9 @@ options = { path = "/ws" }            # tls, cert_file, key_file, sni as for tls
 [[transport_listen]]
 transport = "quic"
 port_range = "40000-40099"             # at most 256 ports; each one is bound
+[[transport_listen]]
+transport = "udp"                      # plain UDP, Marmot's own pacing (ADR-0016)
+port_range = "41000-41099"
 # quic options: alpn (default "h3"), cert_file, key_file, sni as for tls
 
 # ---------------------------------------------------------------
@@ -53,7 +56,7 @@ listen = "127.0.0.1:1080"
 [local]
 ipv4_pool = ["192.0.2.10", "192.0.2.11"]
 ipv6_subnet = "2001:db8:1::/64"       # must be routed to this host
-ipv6_rotation = { enabled = true, epoch = "5m", active = 4 }
+ipv6_rotation = { enabled = true, epoch = "5m", active = 4 }  # Linux; route the /64 (deploy.md)
 
 # ---------------------------------------------------------------
 # Session behaviour
@@ -87,13 +90,13 @@ ipv6_subnet = "2001:db8:2::/64"         # Phase 4: rotating addresses
   [[peers.endpoints]]
   transport = "tls"
   ports = [9443, 2083]               # must not collide with panel inbounds on that server
-  # direction = "outbound"            # Phase 4: outbound | inbound | both
+  # direction = "outbound"            # outbound | inbound (peer dials us) | both
   options = { sni = "example.com", fingerprint = "chrome" }
 
   [[peers.endpoints]]
   transport = "ws"
   ports = [443]
-  # direction = "inbound"             # Phase 4: peer dials us (reverse)
+  # direction = "inbound"             # reverse: the peer dials us here (ADR-0017)
   # ws options: path (default "/"), host (Host header), tls (default true),
   # sni, fingerprint. tls = false suits a CDN that terminates TLS for us.
   options = { path = "/ws", sni = "cdn.example.com" }
@@ -101,7 +104,7 @@ ipv6_subnet = "2001:db8:2::/64"         # Phase 4: rotating addresses
   [[peers.endpoints]]
   transport = "quic"
   port_range = "40000-40099"
-  # hop_interval = "30s"              # Phase 4: change port during a session
+  hop_interval = "30s"                # move to another port of the range every 30 s
   family = "ipv6"
   # quic options: sni, alpn (default "h3"), datagrams (default true)
 

@@ -38,6 +38,7 @@ const (
 	fkMaxStreamData
 	fkReset
 	fkStop
+	fkDatagram // never resent (ADR-0019)
 )
 
 // sentFrame is the part of a sent packet that matters after sending.
@@ -82,9 +83,15 @@ type mpPath struct {
 	wake chan struct{} // wakes the writer
 	gone chan struct{} // closed when the path is removed
 
+	pace   bool      // the transport does not pace: we do (ADR-0016)
+	tokens float64   // pacing budget in bytes
+	paceAt time.Time // last refill
+
 	dead, draining, suspect bool
 	drainSince              time.Time
-	order                   int // position in the session's order
+	lastFailover            time.Time // last failover reported at info level
+	suspectAt               time.Time // when it last turned suspect
+	order                   int       // position in the session's order
 
 	// Sending.
 	nextPN       uint64

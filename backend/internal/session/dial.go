@@ -48,6 +48,10 @@ func Dial(ctx context.Context, cfg DialConfig, conn transport.Conn, meta PathMet
 		}
 		return s, nil
 	}
+	if !streamCapable(conn) {
+		_ = conn.Close()
+		return nil, errNeedsV2
+	}
 	rc, err := NewResumableConn(cc)
 	if err != nil {
 		_ = conn.Close()

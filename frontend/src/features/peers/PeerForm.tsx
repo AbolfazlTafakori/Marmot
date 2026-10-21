@@ -13,10 +13,14 @@ interface EndpointDraft {
   sni: string;
   /** ws path, grpc service or quic ALPN; other transports have none. */
   extra: string;
+  direction: Direction;
 }
 
-// Transports in this build (Phase 3).
-const transports = ['tls', 'tcp', 'ws', 'grpc', 'quic'];
+type Direction = 'outbound' | 'inbound' | 'both';
+const directions: Direction[] = ['outbound', 'inbound', 'both'];
+
+// Transports in this build (Phase 4).
+const transports = ['tls', 'tcp', 'ws', 'grpc', 'quic', 'udp'];
 
 /** The option each transport keeps in the extra field. */
 const extraOption: Record<string, string | undefined> = { ws: 'path', grpc: 'service', quic: 'alpn' };
@@ -24,7 +28,7 @@ const extraKeys = new Set(Object.values(extraOption));
 
 const extraPlaceholder: Record<string, string | undefined> = { grpc: 'marmot.Tunnel', quic: 'h3' };
 
-const usesTLS = (t: string) => t !== 'tcp';
+const usesTLS = (t: string) => t !== 'tcp' && t !== 'udp';
 
 function optionString(e: Endpoint, key: string | undefined): string {
   const v = key ? e.options?.[key] : undefined;
@@ -37,6 +41,7 @@ function toDraft(e: Endpoint): EndpointDraft {
     ports: e.portRange ?? (e.ports ?? []).join(', '),
     sni: optionString(e, 'sni'),
     extra: optionString(e, extraOption[e.transport]),
+    direction: e.direction,
   };
 }
 
@@ -53,10 +58,13 @@ function fromDraft(d: EndpointDraft, base?: Endpoint): Endpoint {
   const range = /^\s*(\d{1,5})\s*-\s*(\d{1,5})\s*$/.exec(d.ports);
   return {
     transport: d.transport,
-    direction: 'outbound',
+    direction: d.direction,
     family: base?.family ?? 'any',
     ...(range
-      ? { portRange: `${range[1]}-${range[2]}` }
+      ? {
+          portRange: `${range[1]}-${range[2]}`,
+          ...(base?.hopInterval ? { hopInterval: base.hopInterval } : {}),
+        }
       : {
           ports: d.ports
             .split(/[,\s]+/)
@@ -169,7 +177,7 @@ export function PeerForm({
         <legend className="text-sm font-medium">{m.peers.endpoints}</legend>
         {endpoints.length === 0 && <p className="text-xs text-stone-500">{m.peers.inboundOnly}</p>}
         {endpoints.map((d, i) => (
-          <div key={i} className="grid items-end gap-2 sm:grid-cols-[7rem_1fr_1fr_1fr_auto]">
+          <div key={i} className="grid items-end gap-2 sm:grid-cols-[7rem_8rem_1fr_1fr_1fr_auto]">
             <Field label={m.peers.transport}>
               <Select
                 value={d.transport}
@@ -180,6 +188,20 @@ export function PeerForm({
                 {transports.map((t) => (
                   <option key={t} value={t}>
                     {t}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label={m.peers.direction}>
+              <Select
+                value={d.direction}
+                onChange={(e) => {
+                  setEp(i, { direction: e.target.value as Direction });
+                }}
+              >
+                {directions.map((v) => (
+                  <option key={v} value={v}>
+                    {m.peers.directions[v]}
                   </option>
                 ))}
               </Select>
@@ -229,7 +251,10 @@ export function PeerForm({
         <Button
           variant="secondary"
           onClick={() => {
-            setEndpoints([...endpoints, { transport: 'tls', ports: '', sni: '', extra: '' }]);
+            setEndpoints([
+              ...endpoints,
+              { transport: 'tls', ports: '', sni: '', extra: '', direction: 'outbound' },
+            ]);
           }}
         >
           {m.peers.addEndpoint}

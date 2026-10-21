@@ -19,7 +19,13 @@ func peerViewOf(p config.Peer, health map[string]node.PeerStatus) peerView {
 	v := peerView{ID: p.ID, PublicKey: p.PublicKey, Weight: p.Weight, IPv4Pool: p.IPv4Pool, IPv6Pool: p.IPv6Pool,
 		IPv6Subnet: p.IPv6Subnet, Endpoints: []endpointView{}}
 	for _, e := range p.Endpoints {
-		ev := endpointView{Transport: e.Transport, Direction: "outbound", Family: e.Family, Options: e.Options}
+		ev := endpointView{Transport: e.Transport, Direction: e.Direction, Family: e.Family, Options: e.Options}
+		if ev.Direction == "" {
+			ev.Direction = "outbound"
+		}
+		if e.HopInterval != 0 {
+			ev.HopInterval = e.HopInterval.D().String()
+		}
 		for _, port := range e.Ports {
 			ev.Ports = append(ev.Ports, int(port))
 		}
@@ -65,16 +71,18 @@ func (s *Server) handlePeerGet(w http.ResponseWriter, r *http.Request, a *authCt
 	writeError(w, http.StatusNotFound, "not_found", "no such peer")
 }
 
-// peerFromView converts an API peer to config, rejecting what Phase 1
-// cannot do (ADR-0009).
+// peerFromView converts an API peer to config; config validation checks
+// the values.
 func peerFromView(v peerView) (config.Peer, error) {
 	p := config.Peer{ID: v.ID, PublicKey: v.PublicKey, Weight: v.Weight, IPv4Pool: v.IPv4Pool, IPv6Pool: v.IPv6Pool, IPv6Subnet: v.IPv6Subnet}
 	for i, e := range v.Endpoints {
 		path := fmt.Sprintf("endpoints[%d]", i)
-		if e.Direction != "" && e.Direction != "outbound" {
-			return p, invalidField(path+".direction", "only outbound is supported until reverse transports (Phase 4)")
+		ce := config.Endpoint{Transport: e.Transport, Direction: e.Direction, Family: e.Family, Options: e.Options}
+		if e.HopInterval != "" {
+			if err := ce.HopInterval.UnmarshalText([]byte(e.HopInterval)); err != nil {
+				return p, invalidField(path+".hopInterval", err.Error())
+			}
 		}
-		ce := config.Endpoint{Transport: e.Transport, Family: e.Family, Options: e.Options}
 		for _, port := range e.Ports {
 			if port < 1 || port > 65535 {
 				return p, invalidField(path+".ports", "ports must be 1..65535")

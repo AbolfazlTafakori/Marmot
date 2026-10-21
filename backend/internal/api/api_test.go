@@ -498,10 +498,22 @@ func TestPeerEndpoints(t *testing.T) {
 	var vr validationResult
 	in := peer
 	in.ID = "rev"
-	in.Endpoints = []endpointView{{Transport: "tls", Ports: []int{1}, Direction: "inbound"}}
+	revKey, _ := crypto.GenerateIdentity()
+	in.PublicKey = config.FormatPublicKey(revKey.PublicKey())
+	in.Endpoints = []endpointView{{Transport: "tls", Ports: []int{1}, Direction: "sideways"}}
 	if code := c.do("POST", "/api/v1/peers", in, &vr); code != 422 || !strings.Contains(vr.Issues[0].Path, "direction") {
-		t.Fatalf("inbound direction: %d %+v", code, vr)
+		t.Fatalf("unknown direction: %d %+v", code, vr)
 	}
+	// Reverse: an inbound endpoint is kept but never dialed (ADR-0017).
+	in.Endpoints = []endpointView{{Transport: "udp", PortRange: "40000-40009", HopInterval: "30s", Direction: "inbound"}}
+	var rev peerView
+	if code := c.do("POST", "/api/v1/peers", in, &rev); code != 201 && code != 200 {
+		t.Fatalf("inbound endpoint: %d", code)
+	}
+	if len(rev.Endpoints) != 1 || rev.Endpoints[0].Direction != "inbound" || rev.Endpoints[0].HopInterval != "30s" {
+		t.Fatalf("reverse peer %+v", rev.Endpoints)
+	}
+	in.ID = "rev-bad"
 	in.Endpoints = nil
 	in.PublicKey = "ed25519:bad"
 	if code := c.do("POST", "/api/v1/peers", in, &vr); code != 422 {

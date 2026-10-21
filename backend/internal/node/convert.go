@@ -120,7 +120,7 @@ func localCaps(c *config.Config) uint32 {
 		caps |= crypto.CapRelay
 	}
 	if c.Session.Version == 2 {
-		caps |= crypto.CapMultipath
+		caps |= crypto.CapMultipath | crypto.CapDatagrams
 	}
 	return caps
 }

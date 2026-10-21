@@ -33,6 +33,9 @@ func (s *MPSession) addPath(conn transport.Conn, keys crypto.CipherPair, meta Pa
 		return nil, errDuplicatePath
 	}
 	p := newMPPath(id, meta, rc, datagram, maxBody, time.Now())
+	if _, unpaced := conn.(transport.Unpaced); unpaced && datagram {
+		p.pace, p.tokens, p.paceAt = true, float64(paceBurst*maxBody), time.Now()
+	}
 	p.needProbe = true // measure RTT at once
 	s.paths[id] = p
 	if s.resumeTimer != nil {
@@ -112,6 +115,36 @@ func (s *MPSession) wakeWriters() {
 	}
 }
 
+// bestSuspectLocked is the path to carry data when none is healthy: a
+// suspect path that has received something since it turned suspect (its
+// peer still reaches it) before one that has not, then the one that
+// received most recently. Rank or the last acknowledgement would pick a
+// busy path that just died over an idle one that is alive. It is nil while
+// some path is healthy.
+func (s *MPSession) bestSuspectLocked() *mpPath {
+	var best *mpPath
+	alive := func(q *mpPath) bool { return q.lastRecv.After(q.suspectAt) }
+	for _, q := range s.order {
+		if q.healthy() {
+			return nil
+		}
+		if !q.suspect || q.draining || q.dead {
+			continue
+		}
+		switch {
+		case best == nil:
+			best = q
+		case alive(q) != alive(best):
+			if alive(q) {
+				best = q
+			}
+		case q.lastRecv.After(best.lastRecv):
+			best = q
+		}
+	}
+	return best
+}
+
 // healthyDirectLocked reports whether a direct path can take data.
 func (s *MPSession) healthyDirectLocked() bool {
 	for _, p := range s.order {
@@ -133,7 +166,10 @@ func (s *MPSession) usableLocked(p *mpPath, direct bool) bool {
 func (s *MPSession) eligibleNewLocked(p *mpPath) bool {
 	direct := s.healthyDirectLocked()
 	if !s.usableLocked(p, direct) {
-		return false
+		// With no healthy path at all, the suspect one acknowledged most
+		// recently keeps carrying: on a lossy path suspicion comes and
+		// goes, and waiting out each probe would stall every stream.
+		return p == s.bestSuspectLocked()
 	}
 	for _, q := range s.order {
 		if q == p {
